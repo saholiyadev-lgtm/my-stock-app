@@ -52,16 +52,15 @@ def process_stock_row(row, ticker, name=None):
   avg_vol_10 = row[2] or volume or 1
   vwap = row[4] or price
   pe = row[5] or 0
-  eps = row[6] or 0
-  bvps = row[7] or 0  # Book Value Per Share
+  eps = row[6]
+  bvps = row[7]  # Book Value Per Share
   roe = row[8] or 0
   roic = row[9] or 0
   current_ratio = row[12] or 0
   op_margin = row[14] or 0
   net_margin = row[15] or 0
   fcf = row[16] or 0
-  peg = row[17] or 0  # Price/Earnings Growth Ratio
-  pb = row[18] or 0  # Price to Book
+  pb = row[18] or 0  # Price to Book Ratio
   rsi = row[20] or 50.0
   sma200 = row[22] or price
   market_cap = row[23] or 0
@@ -82,32 +81,7 @@ def process_stock_row(row, ticker, name=None):
   if (eps is None or eps == 0) and pe > 0:
     eps = round(price / pe, 2)
 
-  # -------------------------------------------------------------
-  # 1. BRAHMASTRA MODEL A: Piotroski F-Score Calculation (Proxy)
-  # -------------------------------------------------------------
-  piotroski_score = 0
-  if roe > 0:
-    piotroski_score += 1
-  if roic > 0:
-    piotroski_score += 1
-  if fcf > 0:
-    piotroski_score += 1
-  if fcf > (eps * (market_cap / price if market_cap and price else 1)):
-    piotroski_score += 1
-  if current_ratio >= 1.25:
-    piotroski_score += 1
-  if current_ratio >= 2.0:
-    piotroski_score += 1
-  if op_margin > 12:
-    piotroski_score += 1
-  if net_margin > 8:
-    piotroski_score += 1
-  if roe > 15:
-    piotroski_score += 1
-
-  # -------------------------------------------------------------
-  # 2. BRAHMASTRA MODEL B: Intrinsic Valuation Engine
-  # -------------------------------------------------------------
+  # Intrinsic Valuation Engine
   graham_val = (
       math.sqrt(22.5 * eps * bvps)
       if (eps and eps > 0 and bvps and bvps > 0)
@@ -127,74 +101,41 @@ def process_stock_row(row, ticker, name=None):
   elif eps and eps > 0:
     dcf_val = round(eps * (8.5 + 2 * 12) * (4.4 / 7.5), 2)
 
-  # Peter Lynch Fair Value Model
-  lynch_val = round(eps * roe, 2) if (eps > 0 and roe > 0) else None
-
-  valid_vals = [v for v in [dcf_val, graham_val, lynch_val] if v is not None]
-  if valid_vals:
-    fair_val = round(sum(valid_vals) / len(valid_vals), 2)
+  if dcf_val and graham_val:
+    fair_val = round((dcf_val * 0.6) + (graham_val * 0.4), 2)
+  elif dcf_val:
+    fair_val = dcf_val
+  elif graham_val:
+    fair_val = round(graham_val, 2)
   else:
     fair_val = round(price * 1.05, 2)
 
   best_buy = round(fair_val * 0.80, 2)
   rvol = round(volume / avg_vol_10, 2) if avg_vol_10 > 0 else 1.0
 
-  # -------------------------------------------------------------
-  # 3. BRAHMASTRA MODEL C: SMC Order Flow Toxicity & Accumulation
-  # -------------------------------------------------------------
-  smc_score = 0
-  if rvol >= 2.0 and price >= vwap:
-    smc_score += 15  # Heavy Institutional Buying
-  elif rvol >= 1.3 and price >= vwap:
-    smc_score += 10
-  elif price >= vwap:
-    smc_score += 5
-
-  # -------------------------------------------------------------
-  # 4. GOD-LEVEL COMPOSITE BRAHMASTRA MASTER SCORE (100 Pts)
-  # -------------------------------------------------------------
-  master_score = 0
-
-  # Valuation Discount (Max 20 Pts)
+  # Composite God-Score Calculation with Book Value Weightage
+  score = 45
   if price < best_buy:
-    master_score += 20
+    score += 20
   elif price < fair_val:
-    master_score += 12
+    score += 12
 
-  # Book Value Discount (Max 15 Pts)
+  # Book Value Discount Scoring Criteria
   if pb > 0 and pb <= 1.0:
-    master_score += 15
+    score += 15  # Deep Value: Trading below Book Value
   elif pb > 0 and pb <= 1.8:
-    master_score += 8
+    score += 8  # Fair Value relative to Book Assets
 
-  # Piotroski Financial Quality (Max 15 Pts)
-  if piotroski_score >= 7:
-    master_score += 15
-  elif piotroski_score >= 5:
-    master_score += 9
-
-  # SMC Smart Money Orderflow (Max 15 Pts)
-  master_score += smc_score
-
-  # ROE / ROIC Efficiency (Max 15 Pts)
-  if roe >= 18 or roic >= 18:
-    master_score += 15
-  elif roe >= 12 or roic >= 12:
-    master_score += 9
-
-  # Peter Lynch PEG Growth Filter (Max 10 Pts)
-  if peg > 0 and peg <= 1.0:
-    master_score += 10
-  elif peg > 1.0 and peg <= 1.5:
-    master_score += 5
-
-  # Technical & Trend Alignment (Max 10 Pts)
+  if rvol >= 1.5:
+    score += 10
+  if price >= vwap:
+    score += 5
+  if roe > 10:
+    score += 8
   if price > sma200:
-    master_score += 5
-  if 40 <= rsi <= 65:
-    master_score += 5
+    score += 5
 
-  master_score = min(max(master_score, 10), 99)
+  master_score = min(max(score, 10), 99)
   discount = round(((fair_val - price) / price) * 100, 2)
   is_undervalued = price < fair_val
 
@@ -204,8 +145,6 @@ def process_stock_row(row, ticker, name=None):
       'price': round(price, 2),
       'bvps': bvps,
       'pb_ratio': pb,
-      'piotroski_score': piotroski_score,
-      'peg_ratio': round(peg, 2) if peg else 'N/A',
       'fair_val': fair_val,
       'best_buy': best_buy,
       'master_score': master_score,
@@ -213,9 +152,7 @@ def process_stock_row(row, ticker, name=None):
       'discount': discount,
       'is_undervalued': is_undervalued,
       'is_recommended': (
-          master_score >= 75
-          and piotroski_score >= 5
-          and (is_undervalued or pb <= 1.5)
+          master_score >= 70 and (is_undervalued or (pb > 0 and pb <= 1.5))
       ),
   }
 
@@ -391,6 +328,7 @@ def analyze():
       return jsonify({'status': 'error', 'message': 'ડેટા પ્રોસેસિંગમાં ભૂલ.'})
 
     price = row[0] or 0
+    volume = row[1] or 0
     vwap = row[4] or price
     pe = row[5] or 0
     roe = row[8] or 0
@@ -404,7 +342,7 @@ def analyze():
 
     rvol = processed['rvol']
     order_flow_status = (
-        '⚡ SMART MONEY ACCUMULATION (SMC High)'
+        '⚡ SMART MONEY ACCUMULATION'
         if rvol >= 1.5
         else '⚖️ NORMAL VOLUME FLOW'
     )
@@ -420,7 +358,7 @@ def analyze():
     dist_to_low = round(((price - week_low_52) / price) * 100, 2)
 
     smc_zone = (
-        '🔥 NEAR 52W HIGH (Breakout Zone)'
+        '🔥 NEAR 52W HIGH'
         if dist_to_high <= 5
         else (
             '🛡️ DEMAND ORDER BLOCK (Near 52W Low)'
@@ -434,12 +372,12 @@ def analyze():
 
     master_score = processed['master_score']
     if master_score >= 80:
-      val_status = 'GOD-LEVEL BRAHMASTRA STRONG BUY 🚀'
+      val_status = 'GOD-LEVEL STRONG BUY 🚀 (Book Value & SMC Aligned)'
       val_type = 'success'
-    elif master_score >= 65:
+    elif master_score >= 60:
       val_status = 'INSTITUTIONAL ACCUMULATION 🟢'
       val_type = 'success'
-    elif master_score >= 45:
+    elif master_score >= 40:
       val_status = 'NEUTRAL / HOLD 🟡'
       val_type = 'warning'
     else:
@@ -454,8 +392,6 @@ def analyze():
         'current_price': round(price, 2),
         'bvps': processed['bvps'],
         'pb_ratio': processed['pb_ratio'],
-        'piotroski_score': processed['piotroski_score'],
-        'peg_ratio': processed['peg_ratio'],
         'master_score': master_score,
         'is_dev_recommended': processed['is_recommended'],
         'order_flow': {
@@ -494,7 +430,7 @@ def analyze():
 
 
 # -------------------------------------------------------------------
-# FRONTEND UI WITH BRAHMASTRA QUANT & SMC DASHBOARD
+# FRONTEND UI WITH BOOK VALUE INTELLIGENCE & DEV SAHOLIYA RECOS
 # -------------------------------------------------------------------
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -502,38 +438,38 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Brahmastra Quant Stock Intelligence Engine</title>
+    <title>God-Level Stock Intelligence & Book Value Recommendations</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
     <style>
         .glass-card {
-            background: rgba(15, 23, 42, 0.88);
+            background: rgba(15, 23, 42, 0.85);
             backdrop-filter: blur(20px);
             -webkit-backdrop-filter: blur(20px);
             border: 1px solid rgba(255, 255, 255, 0.08);
         }
         .gold-border {
-            border: 1px solid rgba(245, 158, 11, 0.6);
-            box-shadow: 0 0 25px rgba(245, 158, 11, 0.2);
+            border: 1px solid rgba(245, 158, 11, 0.5);
+            box-shadow: 0 0 20px rgba(245, 158, 11, 0.15);
         }
     </style>
 </head>
 <body class="bg-slate-950 text-slate-100 min-h-screen font-sans flex flex-col justify-between bg-fixed bg-cover bg-center relative" 
-      style="background-image: linear-gradient(to bottom, rgba(2, 6, 23, 0.94), rgba(15, 23, 42, 0.98)), url('https://images.unsplash.com/photo-1611974789855-9c2a0a7236a3?q=80&w=1920&auto=format&fit=crop');">
+      style="background-image: linear-gradient(to bottom, rgba(2, 6, 23, 0.92), rgba(15, 23, 42, 0.97)), url('https://images.unsplash.com/photo-1611974789855-9c2a0a7236a3?q=80&w=1920&auto=format&fit=crop');">
 
     <div class="max-w-5xl mx-auto w-full px-4 pt-8 md:pt-12 flex-grow">
         
         <!-- Header -->
         <div class="text-center mb-8">
-            <div class="inline-flex items-center gap-3 bg-slate-900/90 border border-amber-500/50 px-5 py-2 rounded-full mb-4 shadow-xl backdrop-blur-md">
-                <i class="fa-solid fa-wand-magic-sparkles text-amber-400 text-lg animate-pulse"></i>
-                <span class="text-xs md:text-sm font-black tracking-wider text-amber-300 uppercase">Brahmastra Quant & SMC Intelligence Engine</span>
+            <div class="inline-flex items-center gap-3 bg-slate-900/90 border border-emerald-500/40 px-5 py-2 rounded-full mb-4 shadow-xl backdrop-blur-md">
+                <i class="fa-solid fa-crown text-amber-400 text-lg animate-bounce"></i>
+                <span class="text-xs md:text-sm font-semibold tracking-wider text-emerald-400 uppercase">God-Level Book Value & SMC Engine</span>
             </div>
             <h1 class="text-3xl md:text-5xl font-black text-white tracking-tight mb-2 drop-shadow-md">
-                BRAHMASTRA STOCK ANALYTICS
+                INSTITUTIONAL STOCK ANALYTICS
             </h1>
             <p class="text-slate-300 text-sm md:text-base font-medium max-w-2xl mx-auto">
-                Piotroski F-Score, SMC Order Flow, Peter Lynch PEG, Book Value & Graham Intrinsic Confluence
+                Real-Time Book Value (BVPS) Filter, P/B Ratio, Order Flow & Intrinsic Valuation
             </p>
         </div>
 
@@ -542,28 +478,28 @@ HTML_TEMPLATE = """
             <div class="relative flex gap-2">
                 <div class="relative w-full">
                     <input type="text" id="searchInput" placeholder="Search Stock (e.g. Tata Steel, Reliance, Coal India)..." 
-                           class="w-full p-4 pl-12 rounded-2xl glass-card text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-amber-400/80 text-lg shadow-2xl transition-all"
+                           class="w-full p-4 pl-12 rounded-2xl glass-card text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-400/80 text-lg shadow-2xl transition-all"
                            autocomplete="off">
                     <i class="fa-solid fa-magnifying-glass absolute left-4 top-5 text-slate-400 text-xl"></i>
                 </div>
-                <button onclick="triggerAnalysis()" class="px-7 bg-amber-500 hover:bg-amber-600 text-slate-950 font-black rounded-2xl transition-all flex items-center gap-2 shadow-lg hover:shadow-amber-500/20">
-                    <span>Execute</span>
+                <button onclick="triggerAnalysis()" class="px-7 bg-emerald-500 hover:bg-emerald-600 text-slate-950 font-bold rounded-2xl transition-all flex items-center gap-2 shadow-lg hover:shadow-emerald-500/20">
+                    <span>Analyze</span>
                 </button>
             </div>
             <ul id="suggestions" class="absolute left-0 right-0 mt-2 glass-card border border-slate-700/80 rounded-2xl max-h-64 overflow-y-auto hidden z-50 shadow-2xl"></ul>
         </div>
 
-        <!-- DEV SAHOLIYA BRAHMASTRA RECOMMENDED STOCKS SECTION -->
+        <!-- DEV SAHOLIYA RECOMMENDED STOCKS SECTION -->
         <div class="glass-card gold-border p-6 rounded-3xl mb-10 relative overflow-hidden">
             <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-6 border-b border-amber-500/20 pb-4">
                 <div>
                     <div class="flex items-center gap-2 text-amber-400 font-bold text-sm tracking-wider uppercase mb-1">
-                        <i class="fa-solid fa-crown text-amber-400"></i> Brahmastra Multi-Confluence Picks
+                        <i class="fa-solid fa-star text-amber-400"></i> Score 70+ & Book Value Aligned Picks
                     </div>
                     <h2 class="text-xl md:text-2xl font-black text-white">
-                        RECOMMENDED STOCKS BY DEV SAHOLIYA
+                        STOCKS RECOMMENDED BY DEV SAHOLIYA
                     </h2>
-                    <p class="text-xs text-slate-400">Score 75+, Piotroski Health $\ge 5$ and Deep Book Value Discount Picks</p>
+                    <p class="text-xs text-slate-400">Filtered by Score 70+, Undervalued Status & High Book Value Discount</p>
                 </div>
                 <button onclick="loadRecommendations()" class="px-4 py-2 bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 font-bold text-xs rounded-xl transition-all flex items-center gap-2">
                     <i class="fa-solid fa-rotate-right"></i>
@@ -573,28 +509,28 @@ HTML_TEMPLATE = """
 
             <div id="recoLoader" class="hidden text-center py-6">
                 <div class="inline-block animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-amber-400"></div>
-                <p class="mt-2 text-amber-300 text-xs font-semibold">Running Brahmastra Scans Across Market...</p>
+                <p class="mt-2 text-amber-300 text-xs font-semibold">Scanning High Book Value & Score 70+ Picks...</p>
             </div>
 
             <div id="recoGrid" class="grid grid-cols-1 md:grid-cols-3 gap-4">
-                <!-- Dynamic Recommendation Cards -->
+                <!-- Dynamic Recommendation Cards Inserted Here -->
             </div>
         </div>
 
         <!-- Loader -->
         <div id="loader" class="hidden text-center my-12">
-            <div class="inline-block animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-amber-400"></div>
-            <p class="mt-3 text-amber-300 font-semibold tracking-wide">Evaluating Piotroski F-Score & SMC Volume Flow...</p>
+            <div class="inline-block animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-emerald-400"></div>
+            <p class="mt-3 text-emerald-300 font-semibold tracking-wide">Executing Book Value & Institutional Analysis...</p>
         </div>
 
         <!-- Analysis Results -->
         <div id="results" class="hidden space-y-6 mb-12">
             
             <div id="devBadge" class="hidden glass-card gold-border p-4 rounded-2xl flex items-center gap-4 bg-amber-500/10 text-amber-300 border border-amber-500/40">
-                <div class="p-3 bg-amber-500/20 rounded-xl text-amber-400 text-2xl font-black">⚡</div>
+                <div class="p-3 bg-amber-500/20 rounded-xl text-amber-400 text-2xl font-black">⭐</div>
                 <div>
-                    <h4 class="font-black text-base md:text-lg uppercase text-amber-300 tracking-wider">BRAHMASTRA APPROVED DEV SAHOLIYA PICK</h4>
-                    <p class="text-xs text-slate-300">આ સ્ટોકમાં Piotroski F-Score, Book Value, SMC Institutional Buying અને Fair Valuation બધા કન્ફર્મ થયા છે.</p>
+                    <h4 class="font-black text-base md:text-lg uppercase text-amber-300 tracking-wider">OFFICIAL DEV SAHOLIYA RECOMMENDATION PICK</h4>
+                    <p class="text-xs text-slate-300">આ સ્ટોકનો માસ્ટર સ્કોર 70+ છે અને તેની બુક વેલ્યુ (Book Value) અને ડાયરેક્ટ વેલ્યુએશન મજબૂત છે.</p>
                 </div>
             </div>
 
@@ -605,7 +541,7 @@ HTML_TEMPLATE = """
                     <p id="stockSymbol" class="text-slate-400 font-mono text-sm mt-1"></p>
                 </div>
                 <div class="text-left md:text-right">
-                    <span class="text-xs uppercase tracking-wider text-slate-400 block mb-1 font-semibold">Current Market Price</span>
+                    <span class="text-xs uppercase tracking-wider text-slate-400 block mb-1 font-semibold">Current Price</span>
                     <span id="currentPrice" class="text-3xl md:text-4xl font-black text-emerald-400 drop-shadow"></span>
                 </div>
             </div>
@@ -618,7 +554,7 @@ HTML_TEMPLATE = """
                 </div>
 
                 <div class="glass-card p-6 rounded-3xl border border-slate-700/50 text-center flex flex-col justify-center items-center shadow-xl">
-                    <span class="text-xs text-slate-400 uppercase font-bold tracking-wider mb-1">Brahmastra God Score</span>
+                    <span class="text-xs text-slate-400 uppercase font-bold tracking-wider mb-1">Composite God Score</span>
                     <div class="flex items-baseline gap-1">
                         <span id="masterScore" class="text-5xl font-black text-amber-400"></span>
                         <span class="text-slate-400 font-bold">/100</span>
@@ -626,61 +562,22 @@ HTML_TEMPLATE = """
                 </div>
             </div>
 
-            <!-- Brahmastra Key Metrics Dashboard -->
-            <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+            <!-- Valuation & Book Value Grid -->
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
                 
                 <div class="glass-card p-6 rounded-3xl border border-slate-700/50 shadow-xl">
-                    <h3 class="text-lg font-bold text-amber-400 mb-4 flex items-center gap-2">
-                        <i class="fa-solid fa-shield-halved"></i> Piotroski F-Score
-                    </h3>
-                    <div class="text-center py-2">
-                        <span id="piotroskiVal" class="text-4xl font-black text-amber-400"></span>
-                        <span class="text-slate-400 font-bold text-xl">/9</span>
-                        <p id="piotroskiText" class="text-xs text-slate-300 mt-2 font-medium"></p>
-                    </div>
-                </div>
-
-                <div class="glass-card p-6 rounded-3xl border border-slate-700/50 shadow-xl">
-                    <h3 class="text-lg font-bold text-cyan-400 mb-4 flex items-center gap-2">
-                        <i class="fa-solid fa-book-bookmark"></i> Book Value & P/B
-                    </h3>
-                    <div class="space-y-2">
-                        <div class="flex justify-between text-sm">
-                            <span class="text-slate-400">Book Value (BVPS):</span>
-                            <span id="bvpsVal" class="font-bold text-cyan-300"></span>
-                        </div>
-                        <div class="flex justify-between text-sm">
-                            <span class="text-slate-400">Price to Book (P/B):</span>
-                            <span id="pbRatioVal" class="font-bold text-amber-400"></span>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="glass-card p-6 rounded-3xl border border-slate-700/50 shadow-xl">
                     <h3 class="text-lg font-bold text-emerald-400 mb-4 flex items-center gap-2">
-                        <i class="fa-solid fa-chart-line"></i> Peter Lynch PEG
-                    </h3>
-                    <div class="space-y-2">
-                        <div class="flex justify-between text-sm">
-                            <span class="text-slate-400">PEG Ratio:</span>
-                            <span id="pegVal" class="font-bold text-emerald-300"></span>
-                        </div>
-                        <div class="flex justify-between text-sm">
-                            <span class="text-slate-400">RVOL (Institutional):</span>
-                            <span id="rvolVal" class="font-bold text-amber-300"></span>
-                        </div>
-                    </div>
-                </div>
-
-            </div>
-
-            <!-- Valuation Grid -->
-            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div class="glass-card p-6 rounded-3xl border border-slate-700/50 shadow-xl">
-                    <h3 class="text-lg font-bold text-emerald-400 mb-4 flex items-center gap-2">
-                        <i class="fa-solid fa-bullseye"></i> Combined Intrinsic Model
+                        <i class="fa-solid fa-bullseye"></i> Intrinsic & Book Value Models
                     </h3>
                     <div class="space-y-3">
+                        <div class="flex justify-between border-b border-slate-800 pb-2">
+                            <span class="text-slate-400 text-sm">Book Value Per Share (BVPS):</span>
+                            <span id="bvpsVal" class="font-bold text-cyan-400"></span>
+                        </div>
+                        <div class="flex justify-between border-b border-slate-800 pb-2">
+                            <span class="text-slate-400 text-sm">Price to Book Ratio (P/B):</span>
+                            <span id="pbRatioVal" class="font-bold text-amber-400"></span>
+                        </div>
                         <div class="flex justify-between border-b border-slate-800 pb-2">
                             <span class="text-slate-400 text-sm">Combined Fair Value:</span>
                             <span id="fairIntrinsicVal" class="font-bold text-white"></span>
@@ -698,9 +595,13 @@ HTML_TEMPLATE = """
 
                 <div class="glass-card p-6 rounded-3xl border border-slate-700/50 shadow-xl">
                     <h3 class="text-lg font-bold text-purple-400 mb-4 flex items-center gap-2">
-                        <i class="fa-solid fa-heart-pulse"></i> Risk & Profitability Ratios
+                        <i class="fa-solid fa-chart-pie"></i> Financial Ratios & Volume
                     </h3>
                     <div class="space-y-3">
+                        <div class="flex justify-between border-b border-slate-800 pb-2">
+                            <span class="text-slate-400 text-sm">Relative Volume (RVOL):</span>
+                            <span id="rvolVal" class="font-bold text-emerald-400"></span>
+                        </div>
                         <div class="flex justify-between border-b border-slate-800 pb-2">
                             <span class="text-slate-400 text-sm">Return on Equity (ROE):</span>
                             <span id="roeVal" class="font-bold text-white"></span>
@@ -710,11 +611,12 @@ HTML_TEMPLATE = """
                             <span id="peRatio" class="font-bold text-slate-200"></span>
                         </div>
                         <div class="flex justify-between">
-                            <span class="text-slate-400 text-sm">RSI Momentum:</span>
+                            <span class="text-slate-400 text-sm">RSI (14 Momentum):</span>
                             <span id="rsiVal" class="font-bold text-amber-400"></span>
                         </div>
                     </div>
                 </div>
+
             </div>
 
         </div>
@@ -723,10 +625,10 @@ HTML_TEMPLATE = """
     <!-- Footer -->
     <footer class="w-full mt-12 border-t border-slate-800/80 bg-slate-950/90 backdrop-blur-xl py-8 text-center shadow-2xl">
         <div class="max-w-4xl mx-auto px-4">
-            <h2 class="text-2xl md:text-4xl font-black tracking-widest text-transparent bg-clip-text bg-gradient-to-r from-amber-300 via-amber-400 to-yellow-500 hover:scale-105 transition-transform duration-300 drop-shadow-xl">
+            <h2 class="text-2xl md:text-4xl font-black tracking-widest text-transparent bg-clip-text bg-gradient-to-r from-emerald-400 via-amber-300 to-yellow-500 hover:scale-105 transition-transform duration-300 drop-shadow-xl">
                 MADE BY DEV SAHOLIYA
             </h2>
-            <p class="text-xs text-slate-400 mt-2 tracking-wider uppercase font-semibold">Brahmastra Institutional & Quant Engine</p>
+            <p class="text-xs text-slate-400 mt-2 tracking-wider uppercase font-semibold">God-Level Book Value & OrderFlow Intelligence Portal</p>
         </div>
     </footer>
 
@@ -776,19 +678,19 @@ HTML_TEMPLATE = """
                                         <span class="font-bold text-white">₹${item.price}</span>
                                     </div>
                                     <div class="text-center">
-                                        <span class="text-slate-400 block">F-Score</span>
-                                        <span class="font-bold text-amber-400">${item.piotroski_score}/9</span>
+                                        <span class="text-slate-400 block">Book Value</span>
+                                        <span class="font-bold text-cyan-400">₹${item.bvps}</span>
                                     </div>
                                     <div class="text-right">
                                         <span class="text-slate-400 block">P/B Ratio</span>
-                                        <span class="font-bold text-cyan-400">${item.pb_ratio}x</span>
+                                        <span class="font-bold text-amber-400">${item.pb_ratio}x</span>
                                     </div>
                                 </div>
                             `;
                             recoGrid.appendChild(card);
                         });
                     } else {
-                        recoGrid.innerHTML = '<div class="col-span-3 text-center text-slate-400 py-4 text-xs">હાલમાં બ્રહ્માસ્ત્ર સ્કેનિંગમાં લાયક સ્ટોક મળ્યો નથી.</div>';
+                        recoGrid.innerHTML = '<div class="col-span-3 text-center text-slate-400 py-4 text-xs">હાલમાં કોઈ સ્ટોક રેકમેન્ડેશન ક્રાઈટેરિયામાં મેચ થયો નથી.</div>';
                     }
                 })
                 .catch(() => {
@@ -819,7 +721,7 @@ HTML_TEMPLATE = """
                         data.forEach(item => {
                             const li = document.createElement('li');
                             li.className = 'p-3 hover:bg-slate-800/90 cursor-pointer flex justify-between items-center border-b border-slate-800 last:border-0 transition-colors';
-                            li.innerHTML = `<div><span class="font-bold text-white">${item.name}</span> <span class="text-xs text-slate-400 ml-2">(${item.symbol})</span></div><span class="text-xs bg-slate-900 text-amber-400 px-2.5 py-1 rounded-full font-semibold border border-amber-500/20">${item.exchange}</span>`;
+                            li.innerHTML = `<div><span class="font-bold text-white">${item.name}</span> <span class="text-xs text-slate-400 ml-2">(${item.symbol})</span></div><span class="text-xs bg-slate-900 text-emerald-400 px-2.5 py-1 rounded-full font-semibold border border-emerald-500/20">${item.exchange}</span>`;
                             li.onclick = () => selectStock(item.symbol, item.name);
                             suggestions.appendChild(li);
                         });
@@ -890,22 +792,10 @@ HTML_TEMPLATE = """
                     document.getElementById('masterScore').innerText = data.master_score;
                     document.getElementById('smcZone').innerText = data.order_flow.smc_zone;
 
-                    document.getElementById('piotroskiVal').innerText = data.piotroski_score;
-                    const pScore = data.piotroski_score;
-                    if (pScore >= 7) {
-                        document.getElementById('piotroskiText').innerText = "🟢 Rock-Solid Financial Strength";
-                    } else if (pScore >= 5) {
-                        document.getElementById('piotroskiText').innerText = "🟡 Stable Financial Health";
-                    } else {
-                        document.getElementById('piotroskiText').innerText = "🔴 Weak Fundamentals / Fraud Risk";
-                    }
-
                     document.getElementById('bvpsVal').innerText = data.technical_and_ratios.bvps;
                     document.getElementById('pbRatioVal').innerText = `${data.technical_and_ratios.pb_ratio}x`;
 
-                    document.getElementById('pegVal').innerText = data.peg_ratio;
                     document.getElementById('rvolVal').innerText = data.order_flow.rvol;
-
                     document.getElementById('fairIntrinsicVal').innerText = data.valuation.fair_intrinsic_value;
                     document.getElementById('bestBuyTarget').innerText = data.valuation.best_buy_target;
                     document.getElementById('discountMargin').innerText = data.valuation.discount_margin;
