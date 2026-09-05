@@ -1,5 +1,4 @@
 import math
-import urllib.parse
 from flask import Flask, jsonify, render_template_string, request
 from flask_cors import CORS
 import requests
@@ -12,33 +11,14 @@ HEADERS = {
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,'
         ' like Gecko) Chrome/122.0.0.0 Safari/537.36'
     ),
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    'Origin': 'https://www.tradingview.com',
+    'Referer': 'https://www.tradingview.com/',
 }
 
 
-def resolve_to_ticker(query):
-  """જો યુઝરે આખું નામ લખ્યું હોય (ઉદા.
-
-  TATA CONSULTANCY SERV LT), તો તેને સાચા Ticker (TCS.NS) માં કન્વર્ટ કરે છે.
-  """
-  query = query.strip()
-  if query.endswith('.NS') or query.endswith('.BO') or len(query.split()) == 1:
-    return query
-
-  try:
-    encoded_q = urllib.parse.quote(query)
-    search_url = f'https://query2.finance.yahoo.com/v1/finance/search?q={encoded_q}&quotesCount=1'
-    res = requests.get(search_url, headers=HEADERS, timeout=4)
-    data = res.json()
-    quotes = data.get('quotes', [])
-    if quotes and 'symbol' in quotes[0]:
-      return quotes[0]['symbol']
-  except Exception:
-    pass
-
-  return query
-
-
+# -------------------------------------------------------------------
+# 1. TRADINGVIEW SEARCH API (Fast & Unlimited)
+# -------------------------------------------------------------------
 @app.route('/api/search', methods=['GET'])
 def search_stocks():
   query = request.args.get('q', '').strip()
@@ -46,119 +26,124 @@ def search_stocks():
     return jsonify([])
 
   try:
-    encoded_q = urllib.parse.quote(query)
-    url = f'https://query2.finance.yahoo.com/v1/finance/search?q={encoded_q}&quotesCount=8&newsCount=0'
+    url = f'https://symbol-search.tradingview.com/symbol_search/?text={query}&type=stock'
     res = requests.get(url, headers=HEADERS, timeout=5)
     data = res.json()
 
     suggestions = []
-    for quote in data.get('quotes', []):
-      symbol = quote.get('symbol')
-      name = (
-          quote.get('shortname')
-          or quote.get('longname')
-          or quote.get('symbol')
-      )
-      exch = quote.get('exchDisp', '')
-      if symbol:
-        suggestions.append({'symbol': symbol, 'name': name, 'exchange': exch})
+    for item in data[:8]:
+      symbol = item.get('symbol')
+      exch = item.get('exchange', '').upper()
+      full_symbol = f'{exch}:{symbol}' if exch else symbol
+      name = item.get('description') or symbol
+
+      suggestions.append({
+          'symbol': full_symbol,
+          'raw_symbol': symbol,
+          'name': name,
+          'exchange': exch,
+      })
 
     return jsonify(suggestions)
   except Exception:
     return jsonify([])
 
 
+# -------------------------------------------------------------------
+# 2. TRADINGVIEW SCANNER & ANALYTICS API
+# -------------------------------------------------------------------
 @app.route('/api/analyze', methods=['GET'])
 def analyze():
-  raw_symbol = request.args.get('symbol', '').strip()
-  if not raw_symbol:
+  raw_query = request.args.get('symbol', '').strip()
+  if not raw_query:
     return jsonify(
         {'status': 'error', 'message': 'સ્ટોકનું નામ અથવા સિમ્બોલ જરૂરી છે.'}
     )
 
-  # Smart Resolution
-  symbol = resolve_to_ticker(raw_symbol)
-
   try:
-    quote_url = (
-        f'https://query1.finance.yahoo.com/v7/finance/quote?symbols={symbol}'
-    )
-    res = requests.get(quote_url, headers=HEADERS, timeout=7)
-    q_data = res.json()
+    # Step A: Resolve symbol if plain text was submitted
+    target_ticker = raw_query
+    company_name = raw_query
+    exchange = 'NSE'
 
-    result_list = q_data.get('quoteResponse', {}).get('result', [])
+    if ':' in raw_query:
+      parts = raw_query.split(':')
+      exchange = parts[0].upper()
+      target_ticker = raw_query
+    else:
+      # Search TradingView for exact ticker
+      search_url = f'https://symbol-search.tradingview.com/symbol_search/?text={raw_query}&type=stock'
+      search_res = requests.get(search_url, headers=HEADERS, timeout=5).json()
+      if search_res:
+        first = search_res[0]
+        exchange = first.get('exchange', 'NSE').upper()
+        sym = first.get('symbol')
+        target_ticker = f'{exchange}:{sym}'
+        company_name = first.get('description') or sym
+      else:
+        target_ticker = f'NSE:{raw_query.upper()}'
 
-    # Retry fallback if direct search failed for Indian stocks
-    if not result_list and not symbol.endswith('.NS'):
-      symbol_ns = f'{symbol}.NS'
-      quote_url = f'https://query1.finance.yahoo.com/v7/finance/quote?symbols={symbol_ns}'
-      res = requests.get(quote_url, headers=HEADERS, timeout=7)
-      q_data = res.json()
-      result_list = q_data.get('quoteResponse', {}).get('result', [])
-      if result_list:
-        symbol = symbol_ns
+    # Step B: Query TradingView Scanner API
+    scanner_url = 'https://scanner.tradingview.com/global/scan'
+    payload = {
+        'symbols': {'tickers': [target_ticker]},
+        'columns': [
+            'close',
+            'price_earnings_ttm',
+            'earnings_per_share_basic_ttm',
+            'book_value_per_share_fq',
+            'return_on_equity_fq',
+            'free_cash_flow_ttm',
+            'operating_cash_flow_ttm',
+            'price_earnings_growth_ttm',
+            'description',
+        ],
+    }
 
-    if not result_list:
+    scan_res = requests.post(
+        scanner_url, json=payload, headers=HEADERS, timeout=6
+    ).json()
+    data_list = scan_res.get('data', [])
+
+    # Retry with India scanner if global scan was empty
+    if not data_list and exchange in ['NSE', 'BSE']:
+      india_scanner_url = 'https://scanner.tradingview.com/india/scan'
+      scan_res = requests.post(
+          india_scanner_url, json=payload, headers=HEADERS, timeout=6
+      ).json()
+      data_list = scan_res.get('data', [])
+
+    if not data_list:
       return jsonify({
           'status': 'error',
           'message': (
-              f"'{raw_symbol}' માટે કોઈ ડેટા મળ્યો નથી. ડ્રોપડાઉનમાંથી સાચો"
-              ' સ્ટોક પસંદ કરો.'
+              f"'{raw_query}' નો ડેટા મળ્યો નથી. ડ્રોપડાઉનમાંથી યોગ્ય સ્ટોક પસંદ"
+              ' કરો.'
           ),
       })
 
-    q = result_list[0]
-    current_price = q.get('regularMarketPrice') or q.get('postMarketPrice') or 0
+    row = data_list[0].get('d', [])
+
+    current_price = row[0] or 0
+    pe = row[1] or 0
+    eps = row[2] or 0
+    bvps = row[3] or 0
+    roe = row[4] or 0
+    free_cash_flow = row[5] or 0
+    operating_cash_flow = row[6] or 0
+    peg = row[7] or 0
+    if len(row) > 8 and row[8]:
+      company_name = row[8]
 
     if current_price == 0:
       return jsonify(
-          {'status': 'error', 'message': f'{symbol} નો લાઈવ ભાવ મળ્યો નથી.'}
+          {'status': 'error', 'message': f'{target_ticker} નો લાઈવ ભાવ મળ્યો નથી.'}
       )
 
-    currency = (
-        '₹'
-        if q.get('currency') == 'INR'
-        or '.NS' in symbol
-        or '.BO' in symbol
-        else '$'
-    )
-    company_name = q.get('longName') or q.get('shortName') or symbol
+    currency = '₹' if exchange in ['NSE', 'BSE', 'MCX', 'INDIA'] else '$'
+    growth_rate = 0.12  # Standard institutional 12% benchmark
 
-    eps = q.get('epsTrailingTwelveMonths') or 0
-    bvps = q.get('bookValue') or 0
-    pe = q.get('trailingPE') or 0
-    forward_pe = q.get('forwardPE') or 0
-    peg = 0
-    free_cash_flow = 0
-    operating_cash_flow = 0
-    growth_rate = 0.12
-
-    try:
-      sum_url = f'https://query2.finance.yahoo.com/v10/finance/quoteSummary/{symbol}?modules=defaultKeyStatistics,financialData'
-      sum_res = requests.get(sum_url, headers=HEADERS, timeout=5)
-      sum_json = sum_res.json()
-      modules = sum_json.get('quoteSummary', {}).get('result', [{}])[0]
-
-      fin_data = modules.get('financialData', {})
-      key_stats = modules.get('defaultKeyStatistics', {})
-
-      if 'freeCashflow' in fin_data:
-        free_cash_flow = fin_data['freeCashflow'].get('raw', 0)
-      if 'operatingCashflow' in fin_data:
-        operating_cash_flow = fin_data['operatingCashflow'].get('raw', 0)
-      if 'pegRatio' in key_stats:
-        peg = key_stats['pegRatio'].get('raw', 0)
-      if 'earningsGrowth' in fin_data:
-        growth_rate = fin_data['earningsGrowth'].get('raw', 0.12)
-    except Exception:
-      pass
-
-    roe = (
-        q.get('returnOnEquity', 0) * 100
-        if q.get('returnOnEquity')
-        else (15.0 if pe > 0 else 0)
-    )
-
+    # Graham Intrinsic Value Calculation
     graham_val = (
         math.sqrt(22.5 * eps * bvps)
         if (eps and eps > 0 and bvps and bvps > 0)
@@ -193,7 +178,7 @@ def analyze():
 
     return jsonify({
         'status': 'success',
-        'symbol': symbol,
+        'symbol': target_ticker,
         'company_name': company_name,
         'currency': currency,
         'current_price': round(current_price, 2),
@@ -223,17 +208,21 @@ def analyze():
         },
         'ratios': {
             'pe_ratio': round(pe, 2) if pe else 'N/A',
-            'forward_pe': round(forward_pe, 2) if forward_pe else 'N/A',
+            'forward_pe': 'N/A',
             'peg_ratio': round(peg, 2) if peg else 'N/A',
-            'roe': f'{round(roe, 2)}%',
+            'roe': f'{round(roe, 2)}%' if roe else 'N/A',
         },
     })
   except Exception as e:
-    return jsonify(
-        {'status': 'error', 'message': f'ડેટા ફેચિંગ એરર: {str(e)}'}
-    )
+    return jsonify({
+        'status': 'error',
+        'message': f'TradingView Engine Error: {str(e)}',
+    })
 
 
+# -------------------------------------------------------------------
+# 3. FRONTEND UI
+# -------------------------------------------------------------------
 HTML_TEMPLATE = """
 <!DOCTYPE html>
 <html lang="en">
@@ -256,6 +245,7 @@ HTML_TEMPLATE = """
       style="background-image: linear-gradient(to bottom, rgba(2, 6, 23, 0.88), rgba(15, 23, 42, 0.94)), url('https://images.unsplash.com/photo-1611974789855-9c2a0a7236a3?q=80&w=1920&auto=format&fit=crop');">
 
     <div class="max-w-4xl mx-auto w-full px-4 pt-8 md:pt-12 flex-grow">
+        
         <div class="text-center mb-10">
             <div class="inline-flex items-center gap-3 bg-slate-900/80 border border-emerald-500/30 px-5 py-2 rounded-full mb-4 shadow-xl backdrop-blur-md">
                 <i class="fa-solid fa-arrow-trend-up text-emerald-400 text-lg animate-pulse"></i>
@@ -290,6 +280,7 @@ HTML_TEMPLATE = """
         </div>
 
         <div id="results" class="hidden space-y-6 mb-12">
+            
             <div class="glass-card p-6 rounded-3xl border border-slate-700/50 flex flex-col md:flex-row justify-between items-start md:items-center gap-4 shadow-2xl">
                 <div>
                     <h2 id="companyName" class="text-2xl md:text-3xl font-extrabold text-white"></h2>
@@ -353,7 +344,7 @@ HTML_TEMPLATE = """
                 </h3>
                 <div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-center">
                     <div class="bg-slate-900/80 p-3 rounded-2xl border border-slate-800">
-                        <p class="text-xs text-slate-400 font-medium">Trailing P/E</p>
+                        <p class="text-xs text-slate-400 font-medium">P/E Ratio</p>
                         <p id="peRatio" class="text-lg font-bold text-white mt-1"></p>
                     </div>
                     <div class="bg-slate-900/80 p-3 rounded-2xl border border-slate-800">
@@ -370,6 +361,7 @@ HTML_TEMPLATE = """
                     </div>
                 </div>
             </div>
+
         </div>
     </div>
 
