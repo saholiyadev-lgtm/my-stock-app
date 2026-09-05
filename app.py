@@ -9,7 +9,7 @@ CORS(app)
 
 
 # -------------------------------------------------------------------
-# 1. LIVE STOCK SEARCH API (Yahoo Finance Autocomplete)
+# 1. LIVE STOCK SEARCH API
 # -------------------------------------------------------------------
 @app.route('/api/search', methods=['GET'])
 def search_stocks():
@@ -19,7 +19,11 @@ def search_stocks():
 
   try:
     url = f'https://query2.finance.yahoo.com/v1/finance/search?q={query}&quotesCount=8&newsCount=0'
-    headers = {'User-Agent': 'Mozilla/5.0'}
+    headers = {
+        'User-Agent': (
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        )
+    }
     res = requests.get(url, headers=headers, timeout=5)
     data = res.json()
 
@@ -41,7 +45,7 @@ def search_stocks():
 
 
 # -------------------------------------------------------------------
-# 2. DEEP ANALYTICAL DETAILS API
+# 2. DEEP ANALYTICAL DETAILS API (With Fast Fallbacks)
 # -------------------------------------------------------------------
 @app.route('/api/analyze', methods=['GET'])
 def analyze():
@@ -51,25 +55,38 @@ def analyze():
 
   try:
     stock = yf.Ticker(symbol)
-    info = stock.info
 
-    current_price = info.get('currentPrice') or info.get(
-        'regularMarketPrice', 0
+    # Fast info retrieval
+    info = {}
+    try:
+      info = stock.info or {}
+    except Exception:
+      info = {}
+
+    fast_info = getattr(stock, 'fast_info', {})
+    current_price = (
+        info.get('currentPrice')
+        or info.get('regularMarketPrice')
+        or getattr(fast_info, 'last_price', 0)
     )
-    if not current_price or current_price == 0:
-      return {
-          'status': 'error',
-          'message': f'{symbol} no data malyo nathi. Please check symbol.',
-      }
 
-    currency = '₹' if info.get('currency') == 'INR' else '$'
-    eps = info.get('trailingEps', 0)
-    bvps = info.get('bookValue', 0)
-    pe = info.get('trailingPE', 0)
-    forward_pe = info.get('forwardPE', 0)
-    peg = info.get('pegRatio', 0)
-    free_cash_flow = info.get('freeCashflow', 0)
-    operating_cash_flow = info.get('operatingCashflow', 0)
+    if not current_price or current_price == 0:
+      return jsonify({
+          'status': 'error',
+          'message': (
+              f'{symbol} માટે ડેટા મળ્યો નથી. કૃપા કરીને યોગ્ય સ્ટોક સિલેક્ટ'
+              ' કરો (દા.ત. RELIANCE.NS, TATAMOTORS.NS).'
+          ),
+      })
+
+    currency = '₹' if info.get('currency') == 'INR' or '.NS' in symbol or '.BO' in symbol else '$'
+    eps = info.get('trailingEps', 0) or 0
+    bvps = info.get('bookValue', 0) or 0
+    pe = info.get('trailingPE', 0) or 0
+    forward_pe = info.get('forwardPE', 0) or 0
+    peg = info.get('pegRatio', 0) or 0
+    free_cash_flow = info.get('freeCashflow', 0) or 0
+    operating_cash_flow = info.get('operatingCashflow', 0) or 0
     roe = (
         info.get('returnOnEquity', 0) * 100
         if info.get('returnOnEquity')
@@ -88,19 +105,16 @@ def analyze():
         else None
     )
 
-    # Best Price to Buy (20% Discount)
     if graham_val:
       best_buy_price = round(graham_val * 0.80, 2)
-    elif pe > 30:
+    elif pe and pe > 30:
       best_buy_price = round(current_price * 0.80, 2)
     else:
       best_buy_price = round(current_price * 0.90, 2)
 
-    # Expected Target Prices
     dcf_1yr_target = round(current_price * (1 + growth_rate), 2)
     dcf_3yr_target = round(current_price * ((1 + growth_rate) ** 3), 2)
 
-    # Valuation Status
     if graham_val and current_price < (graham_val * 0.85):
       status = 'UNDERVALUED 🟢 (Strong Buying Zone)'
       status_type = 'success'
@@ -120,7 +134,7 @@ def analyze():
     return jsonify({
         'status': 'success',
         'symbol': symbol,
-        'company_name': info.get('longName', symbol),
+        'company_name': info.get('longName') or info.get('shortName') or symbol,
         'currency': currency,
         'current_price': round(current_price, 2),
         'valuation': {
@@ -155,11 +169,11 @@ def analyze():
         },
     })
   except Exception as e:
-    return jsonify({'status': 'error', 'message': str(e)})
+    return jsonify({'status': 'error', 'message': f'Server Error: {str(e)}'})
 
 
 # -------------------------------------------------------------------
-# 3. PROFESSIONAL AGGRESSIVE BULL THEME FRONTEND UI
+# 3. FRONTEND UI
 # -------------------------------------------------------------------
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -199,7 +213,7 @@ HTML_TEMPLATE = """
 
         <div class="relative mb-10">
             <div class="relative">
-                <input type="text" id="searchInput" placeholder="Search Stock (e.g. tata mo, reliance, apple)..." 
+                <input type="text" id="searchInput" placeholder="Search Stock (e.g. Reliance, Tata Motors, Apple)..." 
                        class="w-full p-4 pl-12 rounded-2xl glass-card text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-400/80 text-lg shadow-2xl transition-all"
                        autocomplete="off">
                 <i class="fa-solid fa-magnifying-glass absolute left-4 top-5 text-slate-400 text-xl"></i>
@@ -340,6 +354,9 @@ HTML_TEMPLATE = """
                             suggestions.appendChild(li);
                         });
                         suggestions.classList.remove('hidden');
+                    })
+                    .catch(() => {
+                        suggestions.classList.add('hidden');
                     });
             }, 300);
         });
@@ -389,6 +406,10 @@ HTML_TEMPLATE = """
                     document.getElementById('roeRatio').innerText = data.ratios.roe;
 
                     results.classList.remove('hidden');
+                })
+                .catch(err => {
+                    loader.classList.add('hidden');
+                    alert('ડેટા ફેચ કરવામાં પ્રોબ્લેમ આવ્યો છે. કૃપા કરીને ફરી ટ્રાય કરો.');
                 });
         }
 
