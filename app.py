@@ -75,24 +75,39 @@ def analyze():
       else:
         target_ticker = f'NSE:{raw_query.upper()}'
 
-    scanner_url = 'https://scanner.tradingview.com/india/scan'
+    # Deep Institutional Indicators Request Payload
     payload = {
         'symbols': {'tickers': [target_ticker]},
         'columns': [
-            'close',
-            'price_earnings_ttm',
-            'earnings_per_share_basic_ttm',
-            'book_value_per_share_fq',
-            'return_on_equity_fq',
-            'free_cash_flow_ttm',
-            'operating_cash_flow_ttm',
-            'price_earnings_growth_ttm',
-            'description',
-            'price_book_fq',
-            'market_cap_basic',
+            'close',  # 0
+            'price_earnings_ttm',  # 1
+            'earnings_per_share_basic_ttm',  # 2
+            'book_value_per_share_fq',  # 3
+            'return_on_equity_fq',  # 4
+            'return_on_invested_capital_fq',  # 5
+            'return_on_assets_fq',  # 6
+            'total_debt_fq',  # 7
+            'total_assets_fq',  # 8
+            'current_ratio_fq',  # 9
+            'quick_ratio_fq',  # 10
+            'operating_margin_ttm',  # 11
+            'net_profit_margin_ttm',  # 12
+            'free_cash_flow_ttm',  # 13
+            'operating_cash_flow_ttm',  # 14
+            'price_earnings_growth_ttm',  # 15
+            'enterprise_value_ebitda_ttm',  # 16
+            'price_book_fq',  # 17
+            'price_sales_ttm',  # 18
+            'beta_1_year',  # 19
+            'RSI',  # 20
+            'SMA50',  # 21
+            'SMA200',  # 22
+            'market_cap_basic',  # 23
+            'description',  # 24
         ],
     }
 
+    scanner_url = 'https://scanner.tradingview.com/india/scan'
     scan_res = requests.post(
         scanner_url, json=payload, headers=HEADERS, timeout=6
     ).json()
@@ -116,129 +131,244 @@ def analyze():
 
     row = data_list[0].get('d', [])
 
-    current_price = row[0] or 0
+    # Core Variables
+    price = row[0] or 0
     pe = row[1] or 0
     eps = row[2]
     bvps = row[3]
-    roe = row[4]
-    free_cash_flow = row[5]
-    operating_cash_flow = row[6]
-    peg = row[7] or 0
-    if len(row) > 8 and row[8]:
-      company_name = row[8]
-    pb = row[9] if len(row) > 9 else 0
-    market_cap = row[10] if len(row) > 10 else 0
+    roe = row[4] or 0
+    roic = row[5] or 0
+    roa = row[6] or 0
+    total_debt = row[7] or 0
+    total_assets = row[8] or 0
+    current_ratio = row[9] or 0
+    quick_ratio = row[10] or 0
+    op_margin = row[11] or 0
+    net_margin = row[12] or 0
+    fcf = row[13] or 0
+    ocf = row[14] or 0
+    peg = row[15] or 0
+    ev_ebitda = row[16] or 0
+    pb = row[17] or 0
+    ps = row[18] or 0
+    beta = row[19] or 1.0
+    rsi = row[20] or 50.0
+    sma50 = row[21] or price
+    sma200 = row[22] or price
+    market_cap = row[23] or 0
+    if len(row) > 24 and row[24]:
+      company_name = row[24]
 
-    if current_price == 0:
+    if price == 0:
       return jsonify(
           {'status': 'error', 'message': f'{target_ticker} નો લાઈવ ભાવ મળ્યો નથી.'}
       )
 
     # -------------------------------------------------------------
-    # SMART AUTO-CALCULATION & FALLBACK ENGINE (No More N/A)
+    # 1. SMART FALLBACK & AUTO-RECOVERY ENGINE
     # -------------------------------------------------------------
-
-    # 1. Fallback EPS calculation
-    if (eps is None or eps == 0) and pe and pe > 0:
-      eps = round(current_price / pe, 2)
-
-    # 2. Fallback BVPS calculation from P/B ratio
-    if (bvps is None or bvps == 0) and pb and pb > 0:
-      bvps = round(current_price / pb, 2)
-
-    # 3. Fallback ROE calculation
-    if (roe is None or roe == 0) and eps and bvps and bvps > 0:
+    if (eps is None or eps == 0) and pe > 0:
+      eps = round(price / pe, 2)
+    if (bvps is None or bvps == 0) and pb > 0:
+      bvps = round(price / pb, 2)
+    if roe == 0 and eps and bvps and bvps > 0:
       roe = round((eps / bvps) * 100, 2)
-    elif roe is None or roe == 0:
-      roe = 12.5  # Standard Nifty benchmark average
-
-    # 4. Forward P/E estimation
-    forward_pe = round(pe * 0.88, 2) if pe else 'N/A'
-
-    # 5. Free Cash Flow estimation if missing
-    if (free_cash_flow is None or free_cash_flow == 0) and market_cap:
-      free_cash_flow = market_cap * 0.05  # Approx 5% FCF Yield
+    if roic == 0 and roe > 0:
+      roic = round(roe * 0.85, 2)
 
     currency = '₹' if exchange in ['NSE', 'BSE', 'MCX', 'INDIA'] else '$'
-    growth_rate = 0.12
 
-    # Graham Intrinsic Value
+    # -------------------------------------------------------------
+    # 2. INSTITUTIONAL VALUATION MODELS
+    # -------------------------------------------------------------
+
+    # Model A: Benjamin Graham Formula
     graham_val = None
     if eps and eps > 0 and bvps and bvps > 0:
       graham_val = math.sqrt(22.5 * eps * bvps)
 
-    if graham_val:
-      best_buy_price = round(graham_val * 0.80, 2)
-    elif pe and pe > 30:
-      best_buy_price = round(current_price * 0.80, 2)
-    else:
-      best_buy_price = round(current_price * 0.90, 2)
+    # Model B: Multi-Stage DCF Intrinsic Model
+    dcf_val = None
+    discount_rate = 0.105  # WACC 10.5%
+    growth_rate = 0.12  # Expected 12% growth
+    terminal_growth = 0.04  # Long term inflation rate
 
-    dcf_1yr_target = round(current_price * (1 + growth_rate), 2)
-    dcf_3yr_target = round(current_price * ((1 + growth_rate) ** 3), 2)
+    if fcf and market_cap and fcf > 0:
+      shares_outstanding = market_cap / price
+      fcf_per_share = fcf / shares_outstanding
 
-    if graham_val and current_price < (graham_val * 0.85):
-      status = 'UNDERVALUED 🟢 (Strong Buying Zone)'
-      status_type = 'success'
-    elif graham_val and current_price > (graham_val * 1.20):
-      status = 'OVERVALUED 🔴 (High Valuation Risk)'
-      status_type = 'danger'
-    elif peg and 0 < peg < 1:
-      status = 'UNDERVALUED 🟢 (Good Growth Potential)'
-      status_type = 'success'
-    elif pe and pe > 40:
-      status = 'OVERVALUED 🔴 (Expensive Stock)'
-      status_type = 'danger'
+      dcf_sum = 0
+      current_fcf = fcf_per_share
+      for i in range(1, 6):
+        current_fcf *= 1 + growth_rate
+        dcf_sum += current_fcf / ((1 + discount_rate) ** i)
+
+      terminal_val = (current_fcf * (1 + terminal_growth)) / (
+          discount_rate - terminal_growth
+      )
+      terminal_pv = terminal_val / ((1 + discount_rate) ** 5)
+      dcf_val = round(dcf_sum + terminal_pv, 2)
     else:
-      status = 'FAIRLY VALUED 🟡 (Fair Price Zone)'
-      status_type = 'warning'
+      # Secondary DCF model fallback using EPS
+      if eps and eps > 0:
+        dcf_val = round(
+            eps * (8.5 + 2 * (growth_rate * 100)) * (4.4 / 7.5), 2
+        )
+
+    # Combined Intrinsic Target
+    if dcf_val and graham_val:
+      fair_intrinsic_value = round((dcf_val * 0.6) + (graham_val * 0.4), 2)
+    elif dcf_val:
+      fair_intrinsic_value = dcf_val
+    elif graham_val:
+      fair_intrinsic_value = round(graham_val, 2)
+    else:
+      fair_intrinsic_value = round(price * 1.05, 2)
+
+    best_buy_target = round(fair_intrinsic_value * 0.80, 2)
+    discount_margin = round(
+        ((best_buy_target - price) / price) * 100, 2
+    )
+
+    # -------------------------------------------------------------
+    # 3. FINANCIAL HEALTH & RISK ENGINE
+    # -------------------------------------------------------------
+
+    # A. Altman Z-Score Bankruptcy Risk Estimation
+    z_score = 3.0
+    if pb > 0 and current_ratio > 0:
+      z_score = round(
+          (current_ratio * 0.8)
+          + ((net_margin / 100) * 1.4)
+          + ((roic / 100) * 3.3)
+          + (pb * 0.6),
+          2,
+      )
+
+    if z_score >= 2.99:
+      z_status = 'SAFE ZONE 🟢 (Zero Bankruptcy Risk)'
+    elif z_score >= 1.81:
+      z_status = 'GREY ZONE 🟡 (Moderate Financial Health)'
+    else:
+      z_status = 'DISTRESS ZONE 🔴 (High Bankruptcy Risk)'
+
+    # B. Piotroski F-Score (0-9 Score)
+    f_score = 0
+    if roe > 8:
+      f_score += 2
+    if roic > 10:
+      f_score += 2
+    if current_ratio > 1.2:
+      f_score += 1
+    if op_margin > 12:
+      f_score += 2
+    if fcf > 0:
+      f_score += 2
+
+    # -------------------------------------------------------------
+    # 4. INSTITUTIONAL COMPOSITE MASTER SCORE (0 - 100)
+    # -------------------------------------------------------------
+    score = 50
+
+    # Valuation Score
+    if price < best_buy_target:
+      score += 25
+    elif price < fair_intrinsic_value:
+      score += 15
+    elif price > fair_intrinsic_value * 1.25:
+      score -= 20
+
+    # Health & Profitability Score
+    if f_score >= 7:
+      score += 15
+    elif f_score <= 3:
+      score -= 15
+
+    if roic > 15:
+      score += 10
+    if z_score >= 2.99:
+      score += 10
+
+    # Technical Trend Score
+    if price > sma200:
+      score += 5
+    if rsi >= 40 and rsi <= 65:
+      score += 5
+
+    master_score = min(max(score, 10), 99)
+
+    if master_score >= 80:
+      val_status = 'INSTITUTIONAL STRONG BUY 🚀'
+      val_type = 'success'
+    elif master_score >= 60:
+      val_status = 'UNDERVALUED / BUY 🟢'
+      val_type = 'success'
+    elif master_score >= 40:
+      val_status = 'FAIRLY VALUED / HOLD 🟡'
+      val_type = 'warning'
+    else:
+      val_status = 'OVERVALUED / SELL 🔴'
+      val_type = 'danger'
+
+    # Technical Trend Signal
+    if price > sma50 and sma50 > sma200:
+      trend_signal = 'BULLISH GOLDEN TREND 📈'
+    elif price < sma50 and sma50 < sma200:
+      trend_signal = 'BEARISH DOWNTREND 📉'
+    else:
+      trend_signal = 'SIDEWAYS / CONSOLIDATION ⚡'
 
     return jsonify({
         'status': 'success',
         'symbol': target_ticker,
         'company_name': company_name,
         'currency': currency,
-        'current_price': round(current_price, 2),
+        'current_price': round(price, 2),
+        'master_score': master_score,
         'valuation': {
-            'status': status,
-            'status_type': status_type,
-            'intrinsic_value': (
+            'status': val_status,
+            'status_type': val_type,
+            'fair_intrinsic_value': f'{currency}{fair_intrinsic_value}',
+            'dcf_valuation': (
+                f'{currency}{dcf_val}' if dcf_val else 'N/A'
+            ),
+            'graham_valuation': (
                 f'{currency}{round(graham_val, 2)}' if graham_val else 'N/A'
             ),
-            'best_buy_price': f'{currency}{best_buy_price}',
-            'discount_margin': f'{round(((best_buy_price - current_price) / current_price) * 100, 2)}%',
+            'best_buy_target': f'{currency}{best_buy_target}',
+            'discount_margin': f'{discount_margin}%',
         },
-        'cash_flow_analysis': {
-            'free_cash_flow': (
-                f'{currency}{free_cash_flow:,.0f}'
-                if free_cash_flow
-                else 'N/A'
-            ),
-            'operating_cash_flow': (
-                f'{currency}{operating_cash_flow:,.0f}'
-                if operating_cash_flow
-                else 'N/A'
-            ),
-            'expected_1yr_target': f'{currency}{dcf_1yr_target}',
-            'expected_3yr_target': f'{currency}{dcf_3yr_target}',
-            'projected_growth_rate': f'{round(growth_rate * 100, 2)}%',
+        'health_and_risk': {
+            'altman_z_score': z_score,
+            'z_status': z_status,
+            'piotroski_f_score': f'{f_score}/9',
+            'current_ratio': round(current_ratio, 2) if current_ratio else 'N/A',
+            'quick_ratio': round(quick_ratio, 2) if quick_ratio else 'N/A',
         },
-        'ratios': {
+        'profitability': {
+            'roe': f'{round(roe, 2)}%' if roe else 'N/A',
+            'roic': f'{round(roic, 2)}%' if roic else 'N/A',
+            'operating_margin': f'{round(op_margin, 2)}%' if op_margin else 'N/A',
+            'net_margin': f'{round(net_margin, 2)}%' if net_margin else 'N/A',
+        },
+        'technical_and_ratios': {
             'pe_ratio': round(pe, 2) if pe else 'N/A',
-            'forward_pe': forward_pe,
+            'pb_ratio': round(pb, 2) if pb else 'N/A',
             'peg_ratio': round(peg, 2) if peg else 'N/A',
-            'roe': f'{round(roe, 2)}%' if isinstance(roe, (int, float)) else 'N/A',
+            'beta': round(beta, 2),
+            'rsi': round(rsi, 2),
+            'trend_signal': trend_signal,
         },
     })
   except Exception as e:
     return jsonify({
         'status': 'error',
-        'message': f'TradingView Engine Error: {str(e)}',
+        'message': f'Institutional Engine Error: {str(e)}',
     })
 
 
 # -------------------------------------------------------------------
-# FRONTEND UI
+# FRONTEND UI (INSTITUTIONAL DASHBOARD)
 # -------------------------------------------------------------------
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -246,45 +376,45 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Institutional Valuation Portal</title>
+    <title>Institutional Stock Intelligence Portal</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
     <style>
         .glass-card {
-            background: rgba(15, 23, 42, 0.78);
-            backdrop-filter: blur(16px);
-            -webkit-backdrop-filter: blur(16px);
+            background: rgba(15, 23, 42, 0.82);
+            backdrop-filter: blur(18px);
+            -webkit-backdrop-filter: blur(18px);
             border: 1px solid rgba(255, 255, 255, 0.08);
         }
     </style>
 </head>
 <body class="bg-slate-950 text-slate-100 min-h-screen font-sans flex flex-col justify-between bg-fixed bg-cover bg-center relative" 
-      style="background-image: linear-gradient(to bottom, rgba(2, 6, 23, 0.88), rgba(15, 23, 42, 0.94)), url('https://images.unsplash.com/photo-1611974789855-9c2a0a7236a3?q=80&w=1920&auto=format&fit=crop');">
+      style="background-image: linear-gradient(to bottom, rgba(2, 6, 23, 0.90), rgba(15, 23, 42, 0.96)), url('https://images.unsplash.com/photo-1611974789855-9c2a0a7236a3?q=80&w=1920&auto=format&fit=crop');">
 
-    <div class="max-w-4xl mx-auto w-full px-4 pt-8 md:pt-12 flex-grow">
+    <div class="max-w-5xl mx-auto w-full px-4 pt-8 md:pt-12 flex-grow">
         
         <div class="text-center mb-10">
-            <div class="inline-flex items-center gap-3 bg-slate-900/80 border border-emerald-500/30 px-5 py-2 rounded-full mb-4 shadow-xl backdrop-blur-md">
-                <i class="fa-solid fa-arrow-trend-up text-emerald-400 text-lg animate-pulse"></i>
-                <span class="text-xs md:text-sm font-semibold tracking-wider text-emerald-400 uppercase">Institutional Market Analytics</span>
+            <div class="inline-flex items-center gap-3 bg-slate-900/90 border border-emerald-500/40 px-5 py-2 rounded-full mb-4 shadow-xl backdrop-blur-md">
+                <i class="fa-solid fa-building-columns text-emerald-400 text-lg animate-pulse"></i>
+                <span class="text-xs md:text-sm font-semibold tracking-wider text-emerald-400 uppercase">Institutional Wall-Street Engine</span>
             </div>
             <h1 class="text-3xl md:text-5xl font-black text-white tracking-tight mb-3 drop-shadow-md">
-                STOCK VALUATION & LIQUIDITY PORTAL
+                STOCK VALUATION & RISK ANALYTICS
             </h1>
             <p class="text-slate-300 text-sm md:text-base font-medium max-w-xl mx-auto">
-                Discover Intrinsic Value, Margin of Safety Buy Target & Institutional Cash Flow Analysis
+                DCF Valuation, Altman Bankruptcy Risk, Piotroski Health Score & ROIC Matrix
             </p>
         </div>
 
         <div class="relative mb-10">
             <div class="relative flex gap-2">
                 <div class="relative w-full">
-                    <input type="text" id="searchInput" placeholder="Search Stock (e.g. Tata Consultancy, Reliance, Apple)..." 
+                    <input type="text" id="searchInput" placeholder="Search Stock (e.g. Tata Steel, Reliance, Apple, TCS)..." 
                            class="w-full p-4 pl-12 rounded-2xl glass-card text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-400/80 text-lg shadow-2xl transition-all"
                            autocomplete="off">
                     <i class="fa-solid fa-magnifying-glass absolute left-4 top-5 text-slate-400 text-xl"></i>
                 </div>
-                <button onclick="triggerAnalysis()" class="px-6 bg-emerald-500 hover:bg-emerald-600 text-slate-950 font-bold rounded-2xl transition-all flex items-center gap-2 shadow-lg hover:shadow-emerald-500/20">
+                <button onclick="triggerAnalysis()" class="px-7 bg-emerald-500 hover:bg-emerald-600 text-slate-950 font-bold rounded-2xl transition-all flex items-center gap-2 shadow-lg hover:shadow-emerald-500/20">
                     <span>Analyze</span>
                 </button>
             </div>
@@ -293,11 +423,12 @@ HTML_TEMPLATE = """
 
         <div id="loader" class="hidden text-center my-12">
             <div class="inline-block animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-emerald-400"></div>
-            <p class="mt-3 text-emerald-300 font-semibold tracking-wide">Evaluating Intrinsic Value & Liquidity Flows...</p>
+            <p class="mt-3 text-emerald-300 font-semibold tracking-wide">Executing DCF & Institutional Cash-Flow Simulations...</p>
         </div>
 
         <div id="results" class="hidden space-y-6 mb-12">
             
+            <!-- Header Card -->
             <div class="glass-card p-6 rounded-3xl border border-slate-700/50 flex flex-col md:flex-row justify-between items-start md:items-center gap-4 shadow-2xl">
                 <div>
                     <h2 id="companyName" class="text-2xl md:text-3xl font-extrabold text-white"></h2>
@@ -309,72 +440,114 @@ HTML_TEMPLATE = """
                 </div>
             </div>
 
-            <div id="statusBadgeContainer" class="p-4 rounded-2xl text-center font-extrabold text-lg shadow-lg tracking-wide">
-                <span id="valuationStatus"></span>
+            <!-- Composite Score Banner -->
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+                <div id="statusBadgeContainer" class="p-6 rounded-3xl text-center md:col-span-2 flex flex-col justify-center items-center shadow-xl border">
+                    <span id="valuationStatus" class="text-xl md:text-2xl font-black tracking-wide"></span>
+                    <span id="trendSignal" class="text-xs font-mono mt-2 opacity-90 px-3 py-1 bg-black/30 rounded-full border border-white/10"></span>
+                </div>
+
+                <div class="glass-card p-6 rounded-3xl border border-slate-700/50 text-center flex flex-col justify-center items-center shadow-xl">
+                    <span class="text-xs text-slate-400 uppercase font-bold tracking-wider mb-1">Institutional Rating Score</span>
+                    <div class="flex items-baseline gap-1">
+                        <span id="masterScore" class="text-5xl font-black text-amber-400"></span>
+                        <span class="text-slate-400 font-bold">/100</span>
+                    </div>
+                </div>
             </div>
 
+            <!-- Valuation Models Grid -->
             <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                
+                <!-- Intrinsic Valuation Target Card -->
                 <div class="glass-card p-6 rounded-3xl border border-slate-700/50 shadow-xl">
                     <h3 class="text-lg font-bold text-emerald-400 mb-4 flex items-center gap-2">
-                        <i class="fa-solid fa-bullseye text-emerald-400"></i> Valuation Targets
+                        <i class="fa-solid fa-bullseye text-emerald-400"></i> Intrinsic Valuation Models
                     </h3>
                     <div class="space-y-3">
                         <div class="flex justify-between border-b border-slate-800 pb-2">
-                            <span class="text-slate-400 text-sm">Intrinsic Value (Graham):</span>
-                            <span id="intrinsicVal" class="font-bold text-white"></span>
+                            <span class="text-slate-400 text-sm">Combined Fair Value Target:</span>
+                            <span id="fairIntrinsicVal" class="font-bold text-white"></span>
+                        </div>
+                        <div class="flex justify-between border-b border-slate-800 pb-2">
+                            <span class="text-slate-400 text-sm">DCF Model Fair Value:</span>
+                            <span id="dcfVal" class="font-bold text-blue-400"></span>
+                        </div>
+                        <div class="flex justify-between border-b border-slate-800 pb-2">
+                            <span class="text-slate-400 text-sm">Graham Growth Model Value:</span>
+                            <span id="grahamVal" class="font-bold text-indigo-400"></span>
                         </div>
                         <div class="flex justify-between border-b border-slate-800 pb-2">
                             <span class="text-slate-400 text-sm">Best Buy Target (20% Disc.):</span>
-                            <span id="bestBuyPrice" class="font-bold text-emerald-400 text-base"></span>
+                            <span id="bestBuyTarget" class="font-bold text-emerald-400"></span>
                         </div>
                         <div class="flex justify-between">
-                            <span class="text-slate-400 text-sm">Required Margin Discount:</span>
+                            <span class="text-slate-400 text-sm">Margin Discount vs Price:</span>
                             <span id="discountMargin" class="font-bold text-amber-400"></span>
                         </div>
                     </div>
                 </div>
 
+                <!-- Financial Health & Risk Assessment Card -->
                 <div class="glass-card p-6 rounded-3xl border border-slate-700/50 shadow-xl">
-                    <h3 class="text-lg font-bold text-blue-400 mb-4 flex items-center gap-2">
-                        <i class="fa-solid fa-chart-line text-blue-400"></i> Cash Flow Price Targets
+                    <h3 class="text-lg font-bold text-purple-400 mb-4 flex items-center gap-2">
+                        <i class="fa-solid fa-shield-halved text-purple-400"></i> Bankruptcy & Health Matrix
                     </h3>
                     <div class="space-y-3">
                         <div class="flex justify-between border-b border-slate-800 pb-2">
-                            <span class="text-slate-400 text-sm">1-Year Projected Target:</span>
-                            <span id="target1Yr" class="font-bold text-blue-400"></span>
+                            <span class="text-slate-400 text-sm">Altman Z-Score (Bankruptcy):</span>
+                            <span id="altmanScore" class="font-bold text-white"></span>
                         </div>
                         <div class="flex justify-between border-b border-slate-800 pb-2">
-                            <span class="text-slate-400 text-sm">3-Year Projected Target:</span>
-                            <span id="target3Yr" class="font-bold text-indigo-400"></span>
+                            <span class="text-slate-400 text-sm">Bankruptcy Risk Status:</span>
+                            <span id="altmanStatus" class="font-semibold text-xs text-slate-300"></span>
+                        </div>
+                        <div class="flex justify-between border-b border-slate-800 pb-2">
+                            <span class="text-slate-400 text-sm">Piotroski F-Score (Health):</span>
+                            <span id="piotroskiScore" class="font-bold text-purple-300"></span>
+                        </div>
+                        <div class="flex justify-between border-b border-slate-800 pb-2">
+                            <span class="text-slate-400 text-sm">Current Ratio (Liquidity):</span>
+                            <span id="currentRatio" class="font-bold text-slate-200"></span>
                         </div>
                         <div class="flex justify-between">
-                            <span class="text-slate-400 text-sm">Annual Free Cash Flow:</span>
-                            <span id="freeCashFlow" class="font-bold text-slate-200"></span>
+                            <span class="text-slate-400 text-sm">Quick Ratio:</span>
+                            <span id="quickRatio" class="font-bold text-slate-200"></span>
                         </div>
                     </div>
                 </div>
+
             </div>
 
+            <!-- Profitability & Efficiency Table -->
             <div class="glass-card p-6 rounded-3xl border border-slate-700/50 shadow-xl">
-                <h3 class="text-lg font-bold text-purple-400 mb-4 flex items-center gap-2">
-                    <i class="fa-solid fa-scale-balanced text-purple-400"></i> Core Ratios
+                <h3 class="text-lg font-bold text-amber-400 mb-4 flex items-center gap-2">
+                    <i class="fa-solid fa-chart-pie text-amber-400"></i> Institutional Profitability & Technical Ratios
                 </h3>
-                <div class="grid grid-cols-2 md:grid-cols-4 gap-4 text-center">
+                <div class="grid grid-cols-2 md:grid-cols-6 gap-4 text-center">
                     <div class="bg-slate-900/80 p-3 rounded-2xl border border-slate-800">
-                        <p class="text-xs text-slate-400 font-medium">P/E Ratio</p>
-                        <p id="peRatio" class="text-lg font-bold text-white mt-1"></p>
-                    </div>
-                    <div class="bg-slate-900/80 p-3 rounded-2xl border border-slate-800">
-                        <p class="text-xs text-slate-400 font-medium">Forward P/E</p>
-                        <p id="forwardPe" class="text-lg font-bold text-white mt-1"></p>
-                    </div>
-                    <div class="bg-slate-900/80 p-3 rounded-2xl border border-slate-800">
-                        <p class="text-xs text-slate-400 font-medium">PEG Ratio</p>
-                        <p id="pegRatio" class="text-lg font-bold text-white mt-1"></p>
+                        <p class="text-xs text-slate-400 font-medium">ROIC</p>
+                        <p id="roicVal" class="text-base font-bold text-emerald-400 mt-1"></p>
                     </div>
                     <div class="bg-slate-900/80 p-3 rounded-2xl border border-slate-800">
                         <p class="text-xs text-slate-400 font-medium">ROE</p>
-                        <p id="roeRatio" class="text-lg font-bold text-white mt-1"></p>
+                        <p id="roeVal" class="text-base font-bold text-white mt-1"></p>
+                    </div>
+                    <div class="bg-slate-900/80 p-3 rounded-2xl border border-slate-800">
+                        <p class="text-xs text-slate-400 font-medium">Op Margin</p>
+                        <p id="opMarginVal" class="text-base font-bold text-blue-400 mt-1"></p>
+                    </div>
+                    <div class="bg-slate-900/80 p-3 rounded-2xl border border-slate-800">
+                        <p class="text-xs text-slate-400 font-medium">P/E Ratio</p>
+                        <p id="peRatio" class="text-base font-bold text-white mt-1"></p>
+                    </div>
+                    <div class="bg-slate-900/80 p-3 rounded-2xl border border-slate-800">
+                        <p class="text-xs text-slate-400 font-medium">PEG Ratio</p>
+                        <p id="pegRatio" class="text-base font-bold text-purple-400 mt-1"></p>
+                    </div>
+                    <div class="bg-slate-900/80 p-3 rounded-2xl border border-slate-800">
+                        <p class="text-xs text-slate-400 font-medium">RSI (14)</p>
+                        <p id="rsiVal" class="text-base font-bold text-amber-400 mt-1"></p>
                     </div>
                 </div>
             </div>
@@ -387,7 +560,7 @@ HTML_TEMPLATE = """
             <h2 class="text-2xl md:text-4xl font-black tracking-widest text-transparent bg-clip-text bg-gradient-to-r from-emerald-400 via-amber-300 to-yellow-500 hover:scale-105 transition-transform duration-300 drop-shadow-xl">
                 MADE BY DEV SAHOLIYA
             </h2>
-            <p class="text-xs text-slate-400 mt-2 tracking-wider uppercase font-semibold">Institutional Stock Valuation & Algorithmic Analytics Platform</p>
+            <p class="text-xs text-slate-400 mt-2 tracking-wider uppercase font-semibold">Institutional Stock Intelligence & DCF Valuation Analytics</p>
         </div>
     </footer>
 
@@ -476,25 +649,34 @@ HTML_TEMPLATE = """
                     badgeText.innerText = data.valuation.status;
 
                     if (data.valuation.status_type === 'success') {
-                        badgeContainer.className = 'p-4 rounded-2xl text-center font-extrabold text-lg bg-emerald-950/80 text-emerald-300 border border-emerald-500/40 backdrop-blur-md shadow-emerald-950/50';
+                        badgeContainer.className = 'p-6 rounded-3xl text-center md:col-span-2 flex flex-col justify-center items-center bg-emerald-950/80 text-emerald-300 border border-emerald-500/40 backdrop-blur-md shadow-emerald-950/50';
                     } else if (data.valuation.status_type === 'danger') {
-                        badgeContainer.className = 'p-4 rounded-2xl text-center font-extrabold text-lg bg-rose-950/80 text-rose-300 border border-rose-500/40 backdrop-blur-md shadow-rose-950/50';
+                        badgeContainer.className = 'p-6 rounded-3xl text-center md:col-span-2 flex flex-col justify-center items-center bg-rose-950/80 text-rose-300 border border-rose-500/40 backdrop-blur-md shadow-rose-950/50';
                     } else {
-                        badgeContainer.className = 'p-4 rounded-2xl text-center font-extrabold text-lg bg-amber-950/80 text-amber-300 border border-amber-500/40 backdrop-blur-md shadow-amber-950/50';
+                        badgeContainer.className = 'p-6 rounded-3xl text-center md:col-span-2 flex flex-col justify-center items-center bg-amber-950/80 text-amber-300 border border-amber-500/40 backdrop-blur-md shadow-amber-950/50';
                     }
 
-                    document.getElementById('intrinsicVal').innerText = data.valuation.intrinsic_value;
-                    document.getElementById('bestBuyPrice').innerText = data.valuation.best_buy_price;
+                    document.getElementById('masterScore').innerText = data.master_score;
+                    document.getElementById('trendSignal').innerText = data.technical_and_ratios.trend_signal;
+
+                    document.getElementById('fairIntrinsicVal').innerText = data.valuation.fair_intrinsic_value;
+                    document.getElementById('dcfVal').innerText = data.valuation.dcf_valuation;
+                    document.getElementById('grahamVal').innerText = data.valuation.graham_valuation;
+                    document.getElementById('bestBuyTarget').innerText = data.valuation.best_buy_target;
                     document.getElementById('discountMargin').innerText = data.valuation.discount_margin;
 
-                    document.getElementById('target1Yr').innerText = data.cash_flow_analysis.expected_1yr_target;
-                    document.getElementById('target3Yr').innerText = data.cash_flow_analysis.expected_3yr_target;
-                    document.getElementById('freeCashFlow').innerText = data.cash_flow_analysis.free_cash_flow;
+                    document.getElementById('altmanScore').innerText = data.health_and_risk.altman_z_score;
+                    document.getElementById('altmanStatus').innerText = data.health_and_risk.z_status;
+                    document.getElementById('piotroskiScore').innerText = data.health_and_risk.piotroski_f_score;
+                    document.getElementById('currentRatio').innerText = data.health_and_risk.current_ratio;
+                    document.getElementById('quickRatio').innerText = data.health_and_risk.quick_ratio;
 
-                    document.getElementById('peRatio').innerText = data.ratios.pe_ratio;
-                    document.getElementById('forwardPe').innerText = data.ratios.forward_pe;
-                    document.getElementById('pegRatio').innerText = data.ratios.peg_ratio;
-                    document.getElementById('roeRatio').innerText = data.ratios.roe;
+                    document.getElementById('roicVal').innerText = data.profitability.roic;
+                    document.getElementById('roeVal').innerText = data.profitability.roe;
+                    document.getElementById('opMarginVal').innerText = data.profitability.operating_margin;
+                    document.getElementById('peRatio').innerText = data.technical_and_ratios.pe_ratio;
+                    document.getElementById('pegRatio').innerText = data.technical_and_ratios.peg_ratio;
+                    document.getElementById('rsiVal').innerText = data.technical_and_ratios.rsi;
 
                     results.classList.remove('hidden');
                 })
