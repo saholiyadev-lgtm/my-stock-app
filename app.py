@@ -2,10 +2,17 @@ import math
 from flask import Flask, jsonify, render_template_string, request
 from flask_cors import CORS
 import requests
-import yfinance as yf
 
 app = Flask(__name__)
 CORS(app)
+
+HEADERS = {
+    'User-Agent': (
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML,'
+        ' like Gecko) Chrome/122.0.0.0 Safari/537.36'
+    ),
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+}
 
 
 # -------------------------------------------------------------------
@@ -19,12 +26,7 @@ def search_stocks():
 
   try:
     url = f'https://query2.finance.yahoo.com/v1/finance/search?q={query}&quotesCount=8&newsCount=0'
-    headers = {
-        'User-Agent': (
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        )
-    }
-    res = requests.get(url, headers=headers, timeout=5)
+    res = requests.get(url, headers=HEADERS, timeout=5)
     data = res.json()
 
     suggestions = []
@@ -45,7 +47,7 @@ def search_stocks():
 
 
 # -------------------------------------------------------------------
-# 2. DEEP ANALYTICAL DETAILS API (With Fast Fallbacks)
+# 2. DIRECT API ANALYZER (NO YFINANCE CRASHES)
 # -------------------------------------------------------------------
 @app.route('/api/analyze', methods=['GET'])
 def analyze():
@@ -54,51 +56,74 @@ def analyze():
     return jsonify({'status': 'error', 'message': 'Symbol is required'})
 
   try:
-    stock = yf.Ticker(symbol)
-
-    # Fast info retrieval
-    info = {}
-    try:
-      info = stock.info or {}
-    except Exception:
-      info = {}
-
-    fast_info = getattr(stock, 'fast_info', {})
-    current_price = (
-        info.get('currentPrice')
-        or info.get('regularMarketPrice')
-        or getattr(fast_info, 'last_price', 0)
+    # Direct Yahoo Finance Quote Endpoint
+    quote_url = (
+        f'https://query1.finance.yahoo.com/v7/finance/quote?symbols={symbol}'
     )
+    res = requests.get(quote_url, headers=HEADERS, timeout=7)
+    q_data = res.json()
 
-    if not current_price or current_price == 0:
+    result_list = q_data.get('quoteResponse', {}).get('result', [])
+    if not result_list:
       return jsonify({
           'status': 'error',
           'message': (
-              f'{symbol} માટે ડેટા મળ્યો નથી. કૃપા કરીને યોગ્ય સ્ટોક સિલેક્ટ'
-              ' કરો (દા.ત. RELIANCE.NS, TATAMOTORS.NS).'
+              f'{symbol} નો ડેટા મળ્યો નથી. કૃપા કરીને અન્ય સ્ટોક પસંદ કરો.'
           ),
       })
 
-    currency = '₹' if info.get('currency') == 'INR' or '.NS' in symbol or '.BO' in symbol else '$'
-    eps = info.get('trailingEps', 0) or 0
-    bvps = info.get('bookValue', 0) or 0
-    pe = info.get('trailingPE', 0) or 0
-    forward_pe = info.get('forwardPE', 0) or 0
-    peg = info.get('pegRatio', 0) or 0
-    free_cash_flow = info.get('freeCashflow', 0) or 0
-    operating_cash_flow = info.get('operatingCashflow', 0) or 0
-    roe = (
-        info.get('returnOnEquity', 0) * 100
-        if info.get('returnOnEquity')
-        else 0
+    q = result_list[0]
+
+    current_price = q.get('regularMarketPrice') or q.get('postMarketPrice') or 0
+    if current_price == 0:
+      return jsonify({'status': 'error', 'message': f'{symbol} નો લાઈવ ભાવ મળ્યો નથી.'})
+
+    currency = (
+        '₹'
+        if q.get('currency') == 'INR'
+        or '.NS' in symbol
+        or '.BO' in symbol
+        else '$'
     )
-    growth_rate = (
-        info.get('earningsGrowth', 0.10)
-        if info.get('earningsGrowth')
-        else 0.10
+    company_name = q.get('longName') or q.get('shortName') or symbol
+
+    eps = q.get('epsTrailingTwelveMonths') or 0
+    bvps = q.get('bookValue') or 0
+    pe = q.get('trailingPE') or 0
+    forward_pe = q.get('forwardPE') or 0
+    peg = 0  # Default safe
+    free_cash_flow = 0
+    operating_cash_flow = 0
+    growth_rate = 0.12  # Standard 12% benchmark if missing
+
+    # Extra summary modules query safely
+    try:
+      sum_url = f'https://query2.finance.yahoo.com/v10/finance/quoteSummary/{symbol}?modules=defaultKeyStatistics,financialData'
+      sum_res = requests.get(sum_url, headers=HEADERS, timeout=5)
+      sum_json = sum_res.json()
+      modules = sum_json.get('quoteSummary', {}).get('result', [{}])[0]
+
+      fin_data = modules.get('financialData', {})
+      key_stats = modules.get('defaultKeyStatistics', {})
+
+      if 'freeCashflow' in fin_data:
+        free_cash_flow = fin_data['freeCashflow'].get('raw', 0)
+      if 'operatingCashflow' in fin_data:
+        operating_cash_flow = fin_data['operatingCashflow'].get('raw', 0)
+      if 'pegRatio' in key_stats:
+        peg = key_stats['pegRatio'].get('raw', 0)
+      if 'earningsGrowth' in fin_data:
+        growth_rate = fin_data['earningsGrowth'].get('raw', 0.12)
+    except Exception:
+      pass
+
+    roe = (
+        q.get('returnOnEquity', 0) * 100
+        if q.get('returnOnEquity')
+        else (15.0 if pe > 0 else 0)
     )
 
-    # Graham Intrinsic Value
+    # Graham Intrinsic Value Calculation
     graham_val = (
         math.sqrt(22.5 * eps * bvps)
         if (eps and eps > 0 and bvps and bvps > 0)
@@ -134,7 +159,7 @@ def analyze():
     return jsonify({
         'status': 'success',
         'symbol': symbol,
-        'company_name': info.get('longName') or info.get('shortName') or symbol,
+        'company_name': company_name,
         'currency': currency,
         'current_price': round(current_price, 2),
         'valuation': {
@@ -169,7 +194,7 @@ def analyze():
         },
     })
   except Exception as e:
-    return jsonify({'status': 'error', 'message': f'Server Error: {str(e)}'})
+    return jsonify({'status': 'error', 'message': f'Fetch Error: {str(e)}'})
 
 
 # -------------------------------------------------------------------
@@ -213,7 +238,7 @@ HTML_TEMPLATE = """
 
         <div class="relative mb-10">
             <div class="relative">
-                <input type="text" id="searchInput" placeholder="Search Stock (e.g. Reliance, Tata Motors, Apple)..." 
+                <input type="text" id="searchInput" placeholder="Search Stock (e.g. Tata Consultancy, Reliance, Apple)..." 
                        class="w-full p-4 pl-12 rounded-2xl glass-card text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-400/80 text-lg shadow-2xl transition-all"
                        autocomplete="off">
                 <i class="fa-solid fa-magnifying-glass absolute left-4 top-5 text-slate-400 text-xl"></i>
