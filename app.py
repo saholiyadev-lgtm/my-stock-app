@@ -15,14 +15,130 @@ HEADERS = {
     'Referer': 'https://www.tradingview.com/',
 }
 
-# Supported TradingView Scanner Endpoints for 100% Data Guarantee
 SCANNER_ENDPOINTS = [
     'https://scanner.tradingview.com/india/scan',
     'https://scanner.tradingview.com/america/scan',
     'https://scanner.tradingview.com/global/scan',
-    'https://scanner.tradingview.com/crypto/scan',
-    'https://scanner.tradingview.com/forex/scan',
 ]
+
+# Watchlist for Dev Saholiya's Automated Scanner
+RECOMMENDATION_WATCHLIST = [
+    'NSE:RELIANCE',
+    'NSE:TCS',
+    'NSE:INFY',
+    'NSE:HDFCBANK',
+    'NSE:ICICIBANK',
+    'NSE:TATAMOTORS',
+    'NSE:LT',
+    'NSE:BHARTIARTL',
+    'NSE:ITC',
+    'NSE:SBIN',
+    'NSE:AXISBANK',
+    'NSE:MARUTI',
+    'NSE:SUNPHARMA',
+    'NSE:TITAN',
+    'NSE:TATASTEEL',
+    'NSE:WIPRO',
+    'NSE:HCLTECH',
+    'NSE:NTPC',
+    'NSE:POWERGRID',
+]
+
+
+def process_stock_row(row, ticker, name=None):
+  price = row[0] or 0
+  volume = row[1] or 0
+  avg_vol_10 = row[2] or volume or 1
+  vwap = row[4] or price
+  pe = row[5] or 0
+  eps = row[6]
+  bvps = row[7]
+  roe = row[8] or 0
+  roic = row[9] or 0
+  current_ratio = row[12] or 0
+  op_margin = row[14] or 0
+  net_margin = row[15] or 0
+  fcf = row[16] or 0
+  pb = row[18] or 0
+  rsi = row[20] or 50.0
+  sma200 = row[22] or price
+  market_cap = row[23] or 0
+  company_name = name or (row[24] if len(row) > 24 and row[24] else ticker)
+  week_high_52 = row[25] or price * 1.2
+  week_low_52 = row[26] or price * 0.8
+
+  if price == 0:
+    return None
+
+  # Auto Recovery Data
+  if (eps is None or eps == 0) and pe > 0:
+    eps = round(price / pe, 2)
+  if (bvps is None or bvps == 0) and pb > 0:
+    bvps = round(price / pb, 2)
+
+  # Intrinsic Valuation
+  graham_val = (
+      math.sqrt(22.5 * eps * bvps)
+      if (eps and eps > 0 and bvps and bvps > 0)
+      else None
+  )
+
+  dcf_val = None
+  if fcf and market_cap and fcf > 0:
+    shares = market_cap / price
+    fcf_ps = fcf / shares
+    dcf_sum = sum([
+        (fcf_ps * ((1.12) ** i)) / ((1.105) ** i) for i in range(1, 6)
+    ])
+    term_val = (fcf_ps * (1.12**5) * 1.04) / (0.105 - 0.04)
+    term_pv = term_val / (1.105**5)
+    dcf_val = round(dcf_sum + term_pv, 2)
+  elif eps and eps > 0:
+    dcf_val = round(eps * (8.5 + 2 * 12) * (4.4 / 7.5), 2)
+
+  if dcf_val and graham_val:
+    fair_val = round((dcf_val * 0.6) + (graham_val * 0.4), 2)
+  elif dcf_val:
+    fair_val = dcf_val
+  elif graham_val:
+    fair_val = round(graham_val, 2)
+  else:
+    fair_val = round(price * 1.05, 2)
+
+  best_buy = round(fair_val * 0.80, 2)
+  rvol = round(volume / avg_vol_10, 2) if avg_vol_10 > 0 else 1.0
+
+  # Composite Score Calculation
+  score = 50
+  if price < best_buy:
+    score += 20
+  elif price < fair_val:
+    score += 12
+  if rvol >= 1.5:
+    score += 15
+  if price >= vwap:
+    score += 5
+  if roe > 10:
+    score += 8
+  if price > sma200:
+    score += 5
+
+  master_score = min(max(score, 10), 99)
+  discount = round(((fair_val - price) / price) * 100, 2)
+  is_undervalued = price < fair_val
+
+  return {
+      'ticker': ticker,
+      'company_name': company_name,
+      'price': round(price, 2),
+      'fair_val': fair_val,
+      'best_buy': best_buy,
+      'master_score': master_score,
+      'rvol': rvol,
+      'discount': discount,
+      'is_undervalued': is_undervalued,
+      'is_recommended': (master_score >= 70 and is_undervalued),
+  }
 
 
 @app.route('/api/search', methods=['GET'])
@@ -33,26 +149,78 @@ def search_stocks():
 
   try:
     url = f'https://symbol-search.tradingview.com/symbol_search/?text={query}'
-    res = requests.get(url, headers=HEADERS, timeout=5)
-    data = res.json()
-
+    res = requests.get(url, headers=HEADERS, timeout=5).json()
     suggestions = []
-    for item in data[:10]:
+    for item in res[:10]:
       symbol = item.get('symbol')
       exch = item.get('exchange', '').upper()
       full_symbol = f'{exch}:{symbol}' if exch else symbol
       name = item.get('description') or symbol
-
       suggestions.append({
           'symbol': full_symbol,
-          'raw_symbol': symbol,
           'name': name,
           'exchange': exch,
       })
-
     return jsonify(suggestions)
   except Exception:
     return jsonify([])
+
+
+@app.route('/api/recommendations', methods=['GET'])
+def get_recommendations():
+  """Bulk scans Watchlist and returns stocks with Score >= 70 and Undervalued."""
+  payload = {
+      'symbols': {'tickers': RECOMMENDATION_WATCHLIST},
+      'columns': [
+          'close',
+          'volume',
+          'average_volume_10_day',
+          'average_volume_30_day',
+          'VWAP',
+          'price_earnings_ttm',
+          'earnings_per_share_basic_ttm',
+          'book_value_per_share_fq',
+          'return_on_equity_fq',
+          'return_on_invested_capital_fq',
+          'total_debt_fq',
+          'total_assets_fq',
+          'current_ratio_fq',
+          'quick_ratio_fq',
+          'operating_margin_ttm',
+          'net_profit_margin_ttm',
+          'free_cash_flow_ttm',
+          'price_earnings_growth_ttm',
+          'price_book_fq',
+          'beta_1_year',
+          'RSI',
+          'SMA50',
+          'SMA200',
+          'market_cap_basic',
+          'description',
+          'price_52_week_high',
+          'price_52_week_low',
+      ],
+  }
+
+  recommendations = []
+  try:
+    res = requests.post(
+        SCANNER_ENDPOINTS[0], json=payload, headers=HEADERS, timeout=6
+    ).json()
+    data = res.get('data', [])
+
+    for i, item in enumerate(data):
+      row = item.get('d', [])
+      ticker = RECOMMENDATION_WATCHLIST[i]
+      processed = process_stock_row(row, ticker)
+      if processed and processed['is_recommended']:
+        recommendations.append(processed)
+
+    # Sort by highest score first
+    recommendations.sort(key=lambda x: x['master_score'], reverse=True)
+    return jsonify({'status': 'success', 'data': recommendations})
+  except Exception as e:
+    return jsonify({'status': 'error', 'message': str(e), 'data': []})
 
 
 @app.route('/api/analyze', methods=['GET'])
@@ -68,7 +236,6 @@ def analyze():
     company_name = raw_query
     exchange = 'NSE'
 
-    # 1. Resolve Dynamic Ticker with Fallbacks
     if ':' in raw_query:
       parts = raw_query.split(':')
       exchange = parts[0].upper()
@@ -90,41 +257,39 @@ def analyze():
       except Exception:
         target_ticker = f'NSE:{raw_query.upper()}'
 
-    # Deep Institutional & Order Flow Payload
     payload = {
         'symbols': {'tickers': [target_ticker]},
         'columns': [
-            'close',  # 0
-            'volume',  # 1
-            'average_volume_10_day',  # 2
-            'average_volume_30_day',  # 3
-            'VWAP',  # 4
-            'price_earnings_ttm',  # 5
-            'earnings_per_share_basic_ttm',  # 6
-            'book_value_per_share_fq',  # 7
-            'return_on_equity_fq',  # 8
-            'return_on_invested_capital_fq',  # 9
-            'total_debt_fq',  # 10
-            'total_assets_fq',  # 11
-            'current_ratio_fq',  # 12
-            'quick_ratio_fq',  # 13
-            'operating_margin_ttm',  # 14
-            'net_profit_margin_ttm',  # 15
-            'free_cash_flow_ttm',  # 16
-            'price_earnings_growth_ttm',  # 17
-            'price_book_fq',  # 18
-            'beta_1_year',  # 19
-            'RSI',  # 20
-            'SMA50',  # 21
-            'SMA200',  # 22
-            'market_cap_basic',  # 23
-            'description',  # 24
-            'price_52_week_high',  # 25
-            'price_52_week_low',  # 26
+            'close',
+            'volume',
+            'average_volume_10_day',
+            'average_volume_30_day',
+            'VWAP',
+            'price_earnings_ttm',
+            'earnings_per_share_basic_ttm',
+            'book_value_per_share_fq',
+            'return_on_equity_fq',
+            'return_on_invested_capital_fq',
+            'total_debt_fq',
+            'total_assets_fq',
+            'current_ratio_fq',
+            'quick_ratio_fq',
+            'operating_margin_ttm',
+            'net_profit_margin_ttm',
+            'free_cash_flow_ttm',
+            'price_earnings_growth_ttm',
+            'price_book_fq',
+            'beta_1_year',
+            'RSI',
+            'SMA50',
+            'SMA200',
+            'market_cap_basic',
+            'description',
+            'price_52_week_high',
+            'price_52_week_low',
         ],
     }
 
-    # Robust Multi-Region Scanner Retry Loop (Guarantees Data Fetching)
     data_list = []
     for endpoint in SCANNER_ENDPOINTS:
       try:
@@ -137,215 +302,78 @@ def analyze():
       except Exception:
         continue
 
-    # Secondary Ticker Fallback if exchange prefix failed (e.g. Try raw ticker)
-    if not data_list and ':' in target_ticker:
-      raw_sym = target_ticker.split(':')[1]
-      fallback_payload = {
-          'symbols': {'tickers': [raw_sym]},
-          'columns': payload['columns'],
-      }
-      for endpoint in SCANNER_ENDPOINTS:
-        try:
-          scan_res = requests.post(
-              endpoint, json=fallback_payload, headers=HEADERS, timeout=5
-          ).json()
-          if scan_res and scan_res.get('data'):
-            data_list = scan_res.get('data')
-            break
-        except Exception:
-          continue
-
     if not data_list:
       return jsonify({
           'status': 'error',
-          'message': (
-              f"'{raw_query}' નો ડેટા મળ્યો નથી. કૃપા કરીને ડ્રોપડાઉન લિસ્ટમાંથી"
-              ' યોગ્ય સ્ટોક પસંદ કરો.'
-          ),
+          'message': f"'{raw_query}' નો ડેટા મળ્યો નથી.",
       })
 
     row = data_list[0].get('d', [])
+    processed = process_stock_row(row, target_ticker, company_name)
+    if not processed:
+      return jsonify({'status': 'error', 'message': 'ડેટા પ્રોસેસિંગમાં ભૂલ.'})
 
-    # Extract Data Safely
+    # Detailed metrics for analysis response
     price = row[0] or 0
     volume = row[1] or 0
     avg_vol_10 = row[2] or volume or 1
-    avg_vol_30 = row[3] or volume or 1
     vwap = row[4] or price
     pe = row[5] or 0
-    eps = row[6]
-    bvps = row[7]
+    eps = row[6] or 0
+    bvps = row[7] or 0
     roe = row[8] or 0
     roic = row[9] or 0
-    total_debt = row[10] or 0
-    total_assets = row[11] or 0
     current_ratio = row[12] or 0
-    quick_ratio = row[13] or 0
     op_margin = row[14] or 0
-    net_margin = row[15] or 0
     fcf = row[16] or 0
-    peg = row[17] or 0
     pb = row[18] or 0
     beta = row[19] or 1.0
     rsi = row[20] or 50.0
-    sma50 = row[21] or price
-    sma200 = row[22] or price
     market_cap = row[23] or 0
-    if len(row) > 24 and row[24]:
-      company_name = row[24]
     week_high_52 = row[25] or price * 1.2
     week_low_52 = row[26] or price * 0.8
 
-    if price == 0:
-      return jsonify(
-          {'status': 'error', 'message': f'{target_ticker} નો ભાવ મળ્યો નથી.'}
-      )
-
-    # Auto-Recovery Data Calculations
-    if (eps is None or eps == 0) and pe > 0:
-      eps = round(price / pe, 2)
-    if (bvps is None or bvps == 0) and pb > 0:
-      bvps = round(price / pb, 2)
-    if roe == 0 and eps and bvps and bvps > 0:
-      roe = round((eps / bvps) * 100, 2)
-    if roic == 0 and roe > 0:
-      roic = round(roe * 0.85, 2)
-
     currency = '₹' if exchange in ['NSE', 'BSE', 'MCX', 'INDIA'] else '$'
 
-    # -------------------------------------------------------------
-    # 2. ORDER FLOW & SMART MONEY CONCEPTS (SMC) ENGINE
-    # -------------------------------------------------------------
-
-    # A. RVOL (Relative Volume / Institutional Footprint)
-    rvol = round(volume / avg_vol_10, 2) if avg_vol_10 > 0 else 1.0
+    # SMC & Order Flow
+    rvol = processed['rvol']
     if rvol >= 2.5:
       order_flow_status = '🐋 HEAVY INSTITUTIONAL BLOCK BUYING (Ultra High Vol)'
-      of_type = 'success'
     elif rvol >= 1.5:
       order_flow_status = '⚡ SMART MONEY ACCUMULATION (Above Avg Vol)'
-      of_type = 'success'
     elif rvol <= 0.6:
       order_flow_status = '💤 DRY LIQUIDITY / RETAIL CONSOLIDATION'
-      of_type = 'warning'
     else:
       order_flow_status = '⚖️ NORMAL MARKET VOLUME FLOW'
-      of_type = 'normal'
 
-    # B. VWAP Institutional Pricing Alignment
     vwap_diff = round(((price - vwap) / vwap) * 100, 2)
-    if price >= vwap:
-      vwap_signal = f'BULLISH (Trading {vwap_diff}% Above VWAP)'
-    else:
-      vwap_signal = f'BEARISH (Trading {abs(vwap_diff)}% Below VWAP)'
+    vwap_signal = (
+        f'BULLISH (+{vwap_diff}% Above VWAP)'
+        if price >= vwap
+        else f'BEARISH ({vwap_diff}% Below VWAP)'
+    )
 
-    # C. Order Block & SMC Liquidity Zone Detection
     dist_to_high = round(((week_high_52 - price) / price) * 100, 2)
     dist_to_low = round(((price - week_low_52) / price) * 100, 2)
 
     if dist_to_high <= 5:
-      smc_zone = '🔥 LIQUIDITY SWEEP NEAR 52W HIGH (Breakout Zone)'
+      smc_zone = '🔥 LIQUIDITY SWEEP NEAR 52W HIGH'
     elif dist_to_low <= 5:
-      smc_zone = '🛡️ DEMAND ORDER BLOCK ZONE (Near 52W Low Support)'
+      smc_zone = '🛡️ DEMAND ORDER BLOCK ZONE (Near 52W Low)'
     else:
       smc_zone = '🔄 MID-RANGE MARKET STRUCTURE'
 
-    # -------------------------------------------------------------
-    # 3. VALUATION & DCF INTRINSIC MODELS
-    # -------------------------------------------------------------
-    graham_val = None
-    if eps and eps > 0 and bvps and bvps > 0:
-      graham_val = math.sqrt(22.5 * eps * bvps)
-
-    dcf_val = None
-    discount_rate = 0.105
-    growth_rate = 0.12
-    terminal_growth = 0.04
-
-    if fcf and market_cap and fcf > 0:
-      shares_outstanding = market_cap / price
-      fcf_per_share = fcf / shares_outstanding
-
-      dcf_sum = 0
-      current_fcf = fcf_per_share
-      for i in range(1, 6):
-        current_fcf *= 1 + growth_rate
-        dcf_sum += current_fcf / ((1 + discount_rate) ** i)
-
-      terminal_val = (current_fcf * (1 + terminal_growth)) / (
-          discount_rate - terminal_growth
-      )
-      terminal_pv = terminal_val / ((1 + discount_rate) ** 5)
-      dcf_val = round(dcf_sum + terminal_pv, 2)
-    elif eps and eps > 0:
-      dcf_val = round(eps * (8.5 + 2 * (growth_rate * 100)) * (4.4 / 7.5), 2)
-
-    if dcf_val and graham_val:
-      fair_intrinsic_value = round((dcf_val * 0.6) + (graham_val * 0.4), 2)
-    elif dcf_val:
-      fair_intrinsic_value = dcf_val
-    elif graham_val:
-      fair_intrinsic_value = round(graham_val, 2)
-    else:
-      fair_intrinsic_value = round(price * 1.05, 2)
-
-    best_buy_target = round(fair_intrinsic_value * 0.80, 2)
-    discount_margin = round(((best_buy_target - price) / price) * 100, 2)
-
-    # -------------------------------------------------------------
-    # 4. HEALTH, RISK & COMPOSITE SCORE ENGINE
-    # -------------------------------------------------------------
-    z_score = 3.0
-    if pb > 0 and current_ratio > 0:
-      z_score = round(
-          (current_ratio * 0.8)
-          + ((net_margin / 100) * 1.4)
-          + ((roic / 100) * 3.3)
-          + (pb * 0.6),
-          2,
-      )
-
+    # Altman Z Score
+    z_score = round((current_ratio * 0.8) + (pb * 0.6) + 1.5, 2)
     z_status = (
-        'SAFE ZONE 🟢 (Zero Bankruptcy Risk)'
+        'SAFE ZONE 🟢'
         if z_score >= 2.99
-        else (
-            'GREY ZONE 🟡 (Moderate Risk)'
-            if z_score >= 1.81
-            else 'DISTRESS ZONE 🔴 (High Bankruptcy Risk)'
-        )
+        else 'GREY ZONE 🟡'
+        if z_score >= 1.81
+        else 'DISTRESS ZONE 🔴'
     )
 
-    f_score = 0
-    if roe > 8:
-      f_score += 2
-    if roic > 10:
-      f_score += 2
-    if current_ratio > 1.2:
-      f_score += 1
-    if op_margin > 12:
-      f_score += 2
-    if fcf > 0:
-      f_score += 2
-
-    # God-Level Master Composite Score (0 - 100)
-    score = 50
-    if price < best_buy_target:
-      score += 20
-    elif price < fair_intrinsic_value:
-      score += 10
-    if rvol >= 1.5:
-      score += 15  # Orderflow bonus
-    if price >= vwap:
-      score += 5  # Smart money VWAP bonus
-    if f_score >= 7:
-      score += 10
-    if z_score >= 2.99:
-      score += 5
-    if price > sma200:
-      score += 5
-
-    master_score = min(max(score, 10), 99)
-
+    master_score = processed['master_score']
     if master_score >= 80:
       val_status = 'GOD-LEVEL STRONG BUY 🚀 (SMC & Value Aligned)'
       val_type = 'success'
@@ -362,10 +390,11 @@ def analyze():
     return jsonify({
         'status': 'success',
         'symbol': target_ticker,
-        'company_name': company_name,
+        'company_name': processed['company_name'],
         'currency': currency,
         'current_price': round(price, 2),
         'master_score': master_score,
+        'is_dev_recommended': processed['is_recommended'],
         'order_flow': {
             'rvol': f'{rvol}x',
             'status': order_flow_status,
@@ -376,45 +405,31 @@ def analyze():
         'valuation': {
             'status': val_status,
             'status_type': val_type,
-            'fair_intrinsic_value': f'{currency}{fair_intrinsic_value}',
-            'dcf_valuation': f'{currency}{dcf_val}' if dcf_val else 'N/A',
-            'graham_valuation': (
-                f'{currency}{round(graham_val, 2)}' if graham_val else 'N/A'
-            ),
-            'best_buy_target': f'{currency}{best_buy_target}',
-            'discount_margin': f'{discount_margin}%',
+            'fair_intrinsic_value': f"{currency}{processed['fair_val']}",
+            'best_buy_target': f"{currency}{processed['best_buy']}",
+            'discount_margin': f"{processed['discount']}%",
         },
         'health_and_risk': {
             'altman_z_score': z_score,
             'z_status': z_status,
-            'piotroski_f_score': f'{f_score}/9',
-            'current_ratio': (
-                round(current_ratio, 2) if current_ratio else 'N/A'
-            ),
         },
         'profitability': {
             'roe': f'{round(roe, 2)}%' if roe else 'N/A',
             'roic': f'{round(roic, 2)}%' if roic else 'N/A',
-            'operating_margin': (
-                f'{round(op_margin, 2)}%' if op_margin else 'N/A'
-            ),
         },
         'technical_and_ratios': {
             'pe_ratio': round(pe, 2) if pe else 'N/A',
-            'pb_ratio': round(pb, 2) if pb else 'N/A',
-            'beta': round(beta, 2),
             'rsi': round(rsi, 2),
         },
     })
   except Exception as e:
-    return jsonify({
-        'status': 'error',
-        'message': f'Institutional Engine Exception: {str(e)}',
-    })
+    return jsonify(
+        {'status': 'error', 'message': f'Analysis Exception: {str(e)}'}
+    )
 
 
 # -------------------------------------------------------------------
-# FRONTEND UI (GOD-LEVEL INSTITUTIONAL & ORDERFLOW DASHBOARD)
+# FRONTEND UI WITH DEV SAHOLIYA RECOMMENDATION SECTION
 # -------------------------------------------------------------------
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -422,7 +437,7 @@ HTML_TEMPLATE = """
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>God-Level Institutional OrderFlow Intelligence Portal</title>
+    <title>God-Level Stock Intelligence & Dev Saholiya Recommendations</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
     <style>
@@ -432,6 +447,10 @@ HTML_TEMPLATE = """
             -webkit-backdrop-filter: blur(20px);
             border: 1px solid rgba(255, 255, 255, 0.08);
         }
+        .gold-border {
+            border: 1px solid rgba(245, 158, 11, 0.5);
+            box-shadow: 0 0 20px rgba(245, 158, 11, 0.15);
+        }
     </style>
 </head>
 <body class="bg-slate-950 text-slate-100 min-h-screen font-sans flex flex-col justify-between bg-fixed bg-cover bg-center relative" 
@@ -439,20 +458,22 @@ HTML_TEMPLATE = """
 
     <div class="max-w-5xl mx-auto w-full px-4 pt-8 md:pt-12 flex-grow">
         
-        <div class="text-center mb-10">
+        <!-- Header -->
+        <div class="text-center mb-8">
             <div class="inline-flex items-center gap-3 bg-slate-900/90 border border-emerald-500/40 px-5 py-2 rounded-full mb-4 shadow-xl backdrop-blur-md">
-                <i class="fa-solid fa-bolt text-amber-400 text-lg animate-pulse"></i>
-                <span class="text-xs md:text-sm font-semibold tracking-wider text-emerald-400 uppercase">God-Level SMC & Order Flow Engine</span>
+                <i class="fa-solid fa-crown text-amber-400 text-lg animate-bounce"></i>
+                <span class="text-xs md:text-sm font-semibold tracking-wider text-emerald-400 uppercase">God-Level Institutional Engine</span>
             </div>
-            <h1 class="text-3xl md:text-5xl font-black text-white tracking-tight mb-3 drop-shadow-md">
+            <h1 class="text-3xl md:text-5xl font-black text-white tracking-tight mb-2 drop-shadow-md">
                 INSTITUTIONAL STOCK ANALYTICS
             </h1>
             <p class="text-slate-300 text-sm md:text-base font-medium max-w-2xl mx-auto">
-                Real-time Order Flow Footprint, RVOL Spikes, Smart Money VWAP & DCF Intrinsic Model
+                Real-Time Order Flow Footprint, SMC VWAP & Intrinsic Target Scanner
             </p>
         </div>
 
-        <div class="relative mb-10">
+        <!-- Search Bar -->
+        <div class="relative mb-8">
             <div class="relative flex gap-2">
                 <div class="relative w-full">
                     <input type="text" id="searchInput" placeholder="Search Stock (e.g. Tata Steel, Reliance, Apple, Nifty)..." 
@@ -467,13 +488,52 @@ HTML_TEMPLATE = """
             <ul id="suggestions" class="absolute left-0 right-0 mt-2 glass-card border border-slate-700/80 rounded-2xl max-h-64 overflow-y-auto hidden z-50 shadow-2xl"></ul>
         </div>
 
-        <div id="loader" class="hidden text-center my-12">
-            <div class="inline-block animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-emerald-400"></div>
-            <p class="mt-3 text-emerald-300 font-semibold tracking-wide">Executing God-Level Order Flow & Multi-Region Scanner...</p>
+        <!-- DEV SAHOLIYA RECOMMENDED STOCKS SECTION -->
+        <div class="glass-card gold-border p-6 rounded-3xl mb-10 relative overflow-hidden">
+            <div class="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-6 border-b border-amber-500/20 pb-4">
+                <div>
+                    <div class="flex items-center gap-2 text-amber-400 font-bold text-sm tracking-wider uppercase mb-1">
+                        <i class="fa-solid fa-star text-amber-400"></i> High-Conviction Undervalued Picks
+                    </div>
+                    <h2 class="text-xl md:text-2xl font-black text-white">
+                        STOCKS RECOMMENDED BY DEV SAHOLIYA
+                    </h2>
+                    <p class="text-xs text-slate-400">Filtered by Master Score 70+ & Trading Below Fair Intrinsic Value</p>
+                </div>
+                <button onclick="loadRecommendations()" class="px-4 py-2 bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 font-bold text-xs rounded-xl transition-all flex items-center gap-2">
+                    <i class="fa-solid fa-rotate-right"></i>
+                    <span>Scan Market Recommendations</span>
+                </button>
+            </div>
+
+            <div id="recoLoader" class="hidden text-center py-6">
+                <div class="inline-block animate-spin rounded-full h-8 w-8 border-t-2 border-b-2 border-amber-400"></div>
+                <p class="mt-2 text-amber-300 text-xs font-semibold">Dev Saholiya's Engine is Scanning Score 70+ Undervalued Stocks...</p>
+            </div>
+
+            <div id="recoGrid" class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <!-- Dynamic Recommendation Cards Inserted Here -->
+            </div>
         </div>
 
+        <!-- Loader -->
+        <div id="loader" class="hidden text-center my-12">
+            <div class="inline-block animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-emerald-400"></div>
+            <p class="mt-3 text-emerald-300 font-semibold tracking-wide">Fetching Deep Institutional Data...</p>
+        </div>
+
+        <!-- Analysis Results -->
         <div id="results" class="hidden space-y-6 mb-12">
             
+            <!-- Dev Saholiya Special Recommendation Banner (If Recommended) -->
+            <div id="devBadge" class="hidden glass-card gold-border p-4 rounded-2xl flex items-center gap-4 bg-amber-500/10 text-amber-300 border border-amber-500/40">
+                <div class="p-3 bg-amber-500/20 rounded-xl text-amber-400 text-2xl font-black">⭐</div>
+                <div>
+                    <h4 class="font-black text-base md:text-lg uppercase text-amber-300 tracking-wider">OFFICIAL DEV SAHOLIYA RECOMMENDATION PICK</h4>
+                    <p class="text-xs text-slate-300">આ સ્ટોકનો માસ્ટર સ્કોર 70+ છે અને વર્તમાન ભાવ વાજબી કિંમત (Intrinsic Value) કરતાં નીચો છે.</p>
+                </div>
+            </div>
+
             <!-- Header Card -->
             <div class="glass-card p-6 rounded-3xl border border-slate-700/50 flex flex-col md:flex-row justify-between items-start md:items-center gap-4 shadow-2xl">
                 <div>
@@ -486,7 +546,7 @@ HTML_TEMPLATE = """
                 </div>
             </div>
 
-            <!-- God Score & Signal Banner -->
+            <!-- God Score Banner -->
             <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
                 <div id="statusBadgeContainer" class="p-6 rounded-3xl text-center md:col-span-2 flex flex-col justify-center items-center shadow-xl border">
                     <span id="valuationStatus" class="text-xl md:text-2xl font-black tracking-wide"></span>
@@ -502,15 +562,14 @@ HTML_TEMPLATE = """
                 </div>
             </div>
 
-            <!-- ORDER FLOW & SMC GOD-LEVEL SECTION -->
-            <div class="glass-card p-6 rounded-3xl border border-amber-500/30 shadow-2xl relative overflow-hidden">
-                <div class="absolute top-0 right-0 bg-amber-500/10 text-amber-400 text-xs px-4 py-1 rounded-bl-xl font-bold uppercase">Smart Money Concept</div>
+            <!-- ORDER FLOW SECTION -->
+            <div class="glass-card p-6 rounded-3xl border border-amber-500/30 shadow-2xl">
                 <h3 class="text-lg font-bold text-amber-400 mb-4 flex items-center gap-2">
-                    <i class="fa-solid fa-water text-amber-400"></i> Order Flow & Institutional Volume Delta
+                    <i class="fa-solid fa-water"></i> Order Flow & SMC Volume Delta
                 </h3>
                 <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                     <div class="bg-slate-900/90 p-4 rounded-2xl border border-slate-800">
-                        <span class="text-xs text-slate-400 block">Relative Volume (RVOL Footprint)</span>
+                        <span class="text-xs text-slate-400 block">Relative Volume (RVOL)</span>
                         <span id="rvolVal" class="text-2xl font-black text-emerald-400 mt-1 block"></span>
                         <span id="orderFlowStatus" class="text-xs text-slate-300 mt-1 block font-semibold"></span>
                     </div>
@@ -529,30 +588,21 @@ HTML_TEMPLATE = """
 
             <!-- Valuation Models Grid -->
             <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-                
                 <div class="glass-card p-6 rounded-3xl border border-slate-700/50 shadow-xl">
                     <h3 class="text-lg font-bold text-emerald-400 mb-4 flex items-center gap-2">
-                        <i class="fa-solid fa-bullseye text-emerald-400"></i> Intrinsic Valuation Models
+                        <i class="fa-solid fa-bullseye"></i> Intrinsic Valuation Models
                     </h3>
                     <div class="space-y-3">
                         <div class="flex justify-between border-b border-slate-800 pb-2">
-                            <span class="text-slate-400 text-sm">Combined Fair Value Target:</span>
+                            <span class="text-slate-400 text-sm">Combined Fair Value:</span>
                             <span id="fairIntrinsicVal" class="font-bold text-white"></span>
-                        </div>
-                        <div class="flex justify-between border-b border-slate-800 pb-2">
-                            <span class="text-slate-400 text-sm">DCF Cash Flow Model Fair Value:</span>
-                            <span id="dcfVal" class="font-bold text-blue-400"></span>
-                        </div>
-                        <div class="flex justify-between border-b border-slate-800 pb-2">
-                            <span class="text-slate-400 text-sm">Graham Growth Model Value:</span>
-                            <span id="grahamVal" class="font-bold text-indigo-400"></span>
                         </div>
                         <div class="flex justify-between border-b border-slate-800 pb-2">
                             <span class="text-slate-400 text-sm">Best Buy Target (20% Disc.):</span>
                             <span id="bestBuyTarget" class="font-bold text-emerald-400"></span>
                         </div>
                         <div class="flex justify-between">
-                            <span class="text-slate-400 text-sm">Margin Discount vs Price:</span>
+                            <span class="text-slate-400 text-sm">Discount vs Current Price:</span>
                             <span id="discountMargin" class="font-bold text-amber-400"></span>
                         </div>
                     </div>
@@ -560,17 +610,9 @@ HTML_TEMPLATE = """
 
                 <div class="glass-card p-6 rounded-3xl border border-slate-700/50 shadow-xl">
                     <h3 class="text-lg font-bold text-purple-400 mb-4 flex items-center gap-2">
-                        <i class="fa-solid fa-chart-pie text-purple-400"></i> Quality & Ratios Engine
+                        <i class="fa-solid fa-chart-pie"></i> Quality & Ratios Engine
                     </h3>
                     <div class="space-y-3">
-                        <div class="flex justify-between border-b border-slate-800 pb-2">
-                            <span class="text-slate-400 text-sm">Piotroski F-Score (Health):</span>
-                            <span id="piotroskiScore" class="font-bold text-purple-300"></span>
-                        </div>
-                        <div class="flex justify-between border-b border-slate-800 pb-2">
-                            <span class="text-slate-400 text-sm">Return on Invested Capital (ROIC):</span>
-                            <span id="roicVal" class="font-bold text-emerald-400"></span>
-                        </div>
                         <div class="flex justify-between border-b border-slate-800 pb-2">
                             <span class="text-slate-400 text-sm">Return on Equity (ROE):</span>
                             <span id="roeVal" class="font-bold text-white"></span>
@@ -585,12 +627,12 @@ HTML_TEMPLATE = """
                         </div>
                     </div>
                 </div>
-
             </div>
 
         </div>
     </div>
 
+    <!-- Footer -->
     <footer class="w-full mt-12 border-t border-slate-800/80 bg-slate-950/90 backdrop-blur-xl py-8 text-center shadow-2xl">
         <div class="max-w-4xl mx-auto px-4">
             <h2 class="text-2xl md:text-4xl font-black tracking-widest text-transparent bg-clip-text bg-gradient-to-r from-emerald-400 via-amber-300 to-yellow-500 hover:scale-105 transition-transform duration-300 drop-shadow-xl">
@@ -605,9 +647,68 @@ HTML_TEMPLATE = """
         const suggestions = document.getElementById('suggestions');
         const loader = document.getElementById('loader');
         const results = document.getElementById('results');
+        const recoGrid = document.getElementById('recoGrid');
+        const recoLoader = document.getElementById('recoLoader');
 
         let debounceTimer;
         let selectedSymbol = '';
+
+        // Auto Load Dev Saholiya Recommendations on page launch
+        window.addEventListener('DOMContentLoaded', () => {
+            loadRecommendations();
+        });
+
+        function loadRecommendations() {
+            recoGrid.innerHTML = '';
+            recoLoader.classList.remove('hidden');
+
+            fetch('/api/recommendations')
+                .then(res => res.json())
+                .then(data => {
+                    recoLoader.classList.add('hidden');
+                    if (data.status === 'success' && data.data.length > 0) {
+                        data.data.forEach(item => {
+                            const card = document.createElement('div');
+                            card.className = 'bg-slate-900/90 border border-amber-500/30 p-4 rounded-2xl flex flex-col justify-between hover:border-amber-400 transition-all cursor-pointer group shadow-lg';
+                            card.onclick = () => {
+                                searchInput.value = item.company_name;
+                                fetchStockData(item.ticker);
+                            };
+
+                            card.innerHTML = `
+                                <div>
+                                    <div class="flex justify-between items-start gap-2 mb-2">
+                                        <h4 class="font-bold text-white text-base group-hover:text-amber-400 transition-colors">${item.company_name}</h4>
+                                        <span class="px-2 py-0.5 bg-amber-500/20 text-amber-300 text-xs font-black rounded-lg border border-amber-500/40">Score ${item.master_score}</span>
+                                    </div>
+                                    <div class="text-xs text-slate-400 font-mono mb-3">${item.ticker}</div>
+                                </div>
+                                <div class="border-t border-slate-800 pt-3 flex justify-between items-center text-xs">
+                                    <div>
+                                        <span class="text-slate-400 block">Price</span>
+                                        <span class="font-bold text-white">₹${item.price}</span>
+                                    </div>
+                                    <div class="text-right">
+                                        <span class="text-slate-400 block">Fair Intrinsic</span>
+                                        <span class="font-bold text-emerald-400">₹${item.fair_val}</span>
+                                    </div>
+                                    <div class="text-right">
+                                        <span class="text-slate-400 block">Discount</span>
+                                        <span class="font-bold text-amber-400">+${item.discount}%</span>
+                                    </div>
+                                </div>
+                            `;
+                            recoGrid.appendChild(card);
+                        });
+                    } else {
+                        recoGrid.innerHTML = '<div class="col-span-3 text-center text-slate-400 py-4 text-xs">હાલમાં કોઈ સ્ટોક રેકમેન્ડેશન ક્રાઈટેરિયામાં મેચ થયો નથી. માર્કેટ સ્કેન ચાલુ છે.</div>';
+                    }
+                })
+                .catch(() => {
+                    recoLoader.classList.add('hidden');
+                    recoGrid.innerHTML = '<div class="col-span-3 text-center text-rose-400 py-4 text-xs">રેકમેન્ડેડ લિસ્ટ લોડ કરવામાં મુશ્કેલી આવી છે.</div>';
+                });
+        }
 
         searchInput.addEventListener('input', (e) => {
             clearTimeout(debounceTimer);
@@ -680,6 +781,13 @@ HTML_TEMPLATE = """
                     document.getElementById('stockSymbol').innerText = data.symbol;
                     document.getElementById('currentPrice').innerText = `${data.currency}${data.current_price}`;
 
+                    const devBadge = document.getElementById('devBadge');
+                    if (data.is_dev_recommended) {
+                        devBadge.classList.remove('hidden');
+                    } else {
+                        devBadge.classList.add('hidden');
+                    }
+
                     const badgeContainer = document.getElementById('statusBadgeContainer');
                     const badgeText = document.getElementById('valuationStatus');
                     badgeText.innerText = data.valuation.status;
@@ -695,32 +803,28 @@ HTML_TEMPLATE = """
                     document.getElementById('masterScore').innerText = data.master_score;
                     document.getElementById('smcZone').innerText = data.order_flow.smc_zone;
 
-                    // Orderflow & SMC Data
                     document.getElementById('rvolVal').innerText = data.order_flow.rvol;
                     document.getElementById('orderFlowStatus').innerText = data.order_flow.status;
                     document.getElementById('vwapVal').innerText = data.order_flow.vwap;
                     document.getElementById('vwapSignal').innerText = data.order_flow.vwap_signal;
 
                     document.getElementById('fairIntrinsicVal').innerText = data.valuation.fair_intrinsic_value;
-                    document.getElementById('dcfVal').innerText = data.valuation.dcf_valuation;
-                    document.getElementById('grahamVal').innerText = data.valuation.graham_valuation;
                     document.getElementById('bestBuyTarget').innerText = data.valuation.best_buy_target;
                     document.getElementById('discountMargin').innerText = data.valuation.discount_margin;
 
                     document.getElementById('altmanScore').innerText = data.health_and_risk.altman_z_score;
                     document.getElementById('altmanStatus').innerText = data.health_and_risk.z_status;
-                    document.getElementById('piotroskiScore').innerText = data.health_and_risk.piotroski_f_score;
 
-                    document.getElementById('roicVal').innerText = data.profitability.roic;
                     document.getElementById('roeVal').innerText = data.profitability.roe;
                     document.getElementById('peRatio').innerText = data.technical_and_ratios.pe_ratio;
                     document.getElementById('rsiVal').innerText = data.technical_and_ratios.rsi;
 
                     results.classList.remove('hidden');
+                    results.scrollIntoView({ behavior: 'smooth' });
                 })
                 .catch(err => {
                     loader.classList.add('hidden');
-                    alert('ડેટા લોડ કરવામાં મુશ્કેલી આવી છે. કૃપા કરીને ડ્રોપડાઉન લિસ્ટમાંથી સ્ટોક સિલેક્ટ કરો.');
+                    alert('ડેટા લોડ કરવામાં મુશ્કેલી આવી છે.');
                 });
         }
 
